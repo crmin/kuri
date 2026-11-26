@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.github.crmin.kuri</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Application Support/kuri/kuri</string>
+		<string>__launchd</string>
+	</array>
+	<key>UserName</key>
+	<string>SET_BY_INSTALLER</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>SET_BY_INSTALLER</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Sockets</key>
+	<dict>
+		<key>HTTP</key>
+		<array>
+			<dict>
+				<key>SockFamily</key>
+				<string>IPv4</string>
+				<key>SockNodeName</key>
+				<string>127.0.0.1</string>
+				<key>SockServiceName</key>
+				<integer>80</integer>
+			</dict>
+			<dict>
+				<key>SockFamily</key>
+				<string>IPv6</string>
+				<key>SockNodeName</key>
+				<string>::1</string>
+				<key>SockServiceName</key>
+				<integer>80</integer>
+			</dict>
+		</array>
+		<key>Control</key>
+		<dict>
+			<key>SockPathName</key>
+			<string>SET_BY_INSTALLER</string>
+			<key>SockPathOwner</key>
+			<integer>0</integer>
+			<key>SockPathMode</key>
+			<integer>384</integer>
+		</dict>
+	</dict>
+</dict>
+</plist>
