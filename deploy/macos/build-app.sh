@@ -31,9 +31,9 @@ for arch in arm64 amd64; do
         clang_arch=x86_64
     fi
     CGO_ENABLED=1 GOOS=darwin GOARCH=$arch CC="clang -arch $clang_arch" \
-        go build -trimpath -o "$build_dir/kuri-$arch" .
+        go build -trimpath -ldflags=-s -o "$build_dir/kuri-$arch" .
     CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
-        go build -trimpath -o "$build_dir/launcher-$arch" ./cmd/kuri-launcher
+        go build -trimpath -ldflags=-s -o "$build_dir/launcher-$arch" ./cmd/kuri-launcher
 done
 
 app="$build_dir/$app_name"
