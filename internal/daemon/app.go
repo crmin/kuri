@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/crmin/kuri/internal/accesslog"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -111,8 +113,21 @@ func (app *App) activate(ctx context.Context, mode string) (int, error) {
 		_ = conn.SetReadDeadline(time.Now().Add(startTimeout))
 	})
 	defer requestStop()
-	_, err = io.Copy(app.stdout, reader)
-	return state.PID, err
+	console := accesslog.NewConsole(app.stdout)
+	console.Start()
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			console.Enqueue(line)
+		}
+		if err != nil {
+			app.flushConsole(console)
+			if errors.Is(err, io.EOF) {
+				err = nil
+			}
+			return state.PID, err
+		}
+	}
 }
 
 func (app *App) startDetached(ctx context.Context) (int, error) {

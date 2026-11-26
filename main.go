@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/crmin/kuri/internal/accesslog"
 	"github.com/crmin/kuri/internal/cli"
 	"github.com/crmin/kuri/internal/credential"
 	"github.com/crmin/kuri/internal/daemon"
@@ -22,7 +23,13 @@ func main() {
 func run(args []string) int {
 	if len(args) > 0 && args[0] == credential.Argument {
 		if err := credential.Execute(args[1:]); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			// A stopped plugin must exit even if stderr shares a blocked console.
+			diagnostic := accesslog.NewConsole(os.Stderr)
+			diagnostic.Start()
+			diagnostic.Enqueue([]byte(err.Error() + "\n"))
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			_ = diagnostic.Close(ctx)
 			return 1
 		}
 		return 0

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crmin/kuri/internal/accesslog"
 	"github.com/crmin/kuri/internal/launchd"
 	"github.com/crmin/kuri/internal/proxy"
 )
@@ -194,4 +195,60 @@ func TestStopLogsPendingRequestsBeforeExit(t *testing.T) {
 		t.Fatalf("stop event raced a pending request: %v", log)
 	}
 	<-networkStopped
+}
+
+type stalledOutput struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (out stalledOutput) Write(data []byte) (int, error) {
+	select {
+	case out.entered <- struct{}{}:
+	default:
+	}
+	<-out.release
+	return len(data), nil
+}
+
+func TestForegroundShutdownDoesNotWaitForStalledOutput(t *testing.T) {
+	app := testApp(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := stalledOutput{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	defer close(out.release)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- app.serve(ctx, foreground, []net.Listener{listener}, out, nil)
+	}()
+	select {
+	case <-out.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("console did not receive the startup log")
+	}
+
+	cancel()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(consoleFlushTimeout + 2*time.Second):
+		t.Fatal("foreground is waiting for the blocked console")
+	}
+	data, err := os.ReadFile(filepath.Join(app.home, ".kuri", "access.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	for _, want := range []string{"startup", "stop"} {
+		var got accesslog.Event
+		if err := decoder.Decode(&got); err != nil || got.Event != want {
+			t.Fatalf("event=%+v error=%v, want %q", got, err, want)
+		}
+	}
 }

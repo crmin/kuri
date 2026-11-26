@@ -50,7 +50,7 @@ type record struct {
 type Writer struct {
 	mu       sync.Mutex
 	path     string
-	mirror   io.Writer
+	console  *Console
 	now      func() time.Time
 	maxBytes int64
 
@@ -60,8 +60,8 @@ type Writer struct {
 	needsRepair bool
 }
 
-func Open(path string, mirror io.Writer) (*Writer, error) {
-	writer := &Writer{path: path, mirror: mirror, now: time.Now, maxBytes: maxLogBytes}
+func Open(path string, console *Console) (*Writer, error) {
+	writer := &Writer{path: path, console: console, now: time.Now, maxBytes: maxLogBytes}
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return writer, nil
@@ -135,11 +135,7 @@ func (w *Writer) Write(event Event) error {
 	if err != nil {
 		return fmt.Errorf("write access log: %w", err)
 	}
-	if w.mirror != nil {
-		if _, err := w.mirror.Write(line); err != nil {
-			return fmt.Errorf("display log on console: %w", err)
-		}
-	}
+	w.console.Enqueue(line)
 	return nil
 }
 

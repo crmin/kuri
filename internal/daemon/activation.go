@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -88,11 +87,9 @@ func acceptActivation(ctx context.Context, listener *net.UnixListener, claims ch
 
 func (app *App) serveActivation(ctx context.Context, cancel context.CancelFunc, listeners []net.Listener, selected activationRequest) error {
 	conn := selected.conn
-	var initial bytes.Buffer
-	output := &switchWriter{output: &initial}
 	var mirror io.Writer
 	if selected.mode == foreground {
-		mirror = output
+		mirror = conn
 	}
 	_ = conn.SetDeadline(time.Now().Add(startTimeout))
 	acknowledged := false
@@ -105,10 +102,6 @@ func (app *App) serveActivation(ctx context.Context, cancel context.CancelFunc, 
 			return conn.Close()
 		}
 		_ = conn.SetDeadline(time.Time{})
-		output.output = socketWriter{conn}
-		if _, err := output.Write(initial.Bytes()); err != nil {
-			return err
-		}
 		go func() {
 			_, _ = io.Copy(io.Discard, conn)
 			cancel()
@@ -119,17 +112,6 @@ func (app *App) serveActivation(ctx context.Context, cancel context.CancelFunc, 
 		_ = writeReply(conn, failure(err))
 	}
 	return err
-}
-
-type switchWriter struct{ output io.Writer }
-
-func (s *switchWriter) Write(data []byte) (int, error) { return s.output.Write(data) }
-
-type socketWriter struct{ conn *net.UnixConn }
-
-func (s socketWriter) Write(data []byte) (int, error) {
-	_ = s.conn.SetWriteDeadline(time.Now().Add(controlTimeout))
-	return s.conn.Write(data)
 }
 
 type accepted struct {

@@ -19,7 +19,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const shutdownTimeout = 5 * time.Second
+const (
+	shutdownTimeout     = 5 * time.Second
+	consoleFlushTimeout = time.Second
+)
 
 func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener, mirror io.Writer, ready func(State) error) error {
 	defer func() {
@@ -44,7 +47,8 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 	defer kube.StopCredentials()
 	manager := forward.NewManager(kube)
 	defer manager.Close()
-	logger, err := accesslog.Open(filepath.Join(dir, "access.log"), mirror)
+	console := accesslog.NewConsole(mirror)
+	logger, err := accesslog.Open(filepath.Join(dir, "access.log"), console)
 	if err != nil {
 		return fmt.Errorf("open access log: %w", err)
 	}
@@ -78,6 +82,8 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 		}
 	}
 
+	console.Start()
+
 	controlDone := make(chan struct{})
 	stopped := &stopResult{done: make(chan struct{})}
 	go func() {
@@ -105,11 +111,32 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 	credentialErr := kube.StopCredentials()
 	manager.Close()
 	logErr := logger.Write(accesslog.Event{Event: "stop", PID: state.PID, Mode: mode})
+	app.flushConsole(console)
 	stopped.err = logErr
 	close(stopped.done)
 	_ = control.Close()
 	<-controlDone
 	return errors.Join(err, credentialErr, logErr)
+}
+
+func (app *App) flushConsole(console *accesslog.Console) {
+	if console == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), consoleFlushTimeout)
+	defer cancel()
+	if err := console.Close(ctx); err != nil {
+		// A redirected stderr may share the same stalled pipe.
+		reported := make(chan struct{})
+		go func() {
+			fmt.Fprintln(app.stderr, err)
+			close(reported)
+		}()
+		select {
+		case <-reported:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func lockRuntime(directory string) (*os.File, error) {

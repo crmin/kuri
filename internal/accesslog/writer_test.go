@@ -2,6 +2,7 @@ package accesslog
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -63,7 +64,9 @@ func TestLogRetentionBeforeAppend(t *testing.T) {
 func TestConcurrentLogWritesMirrorInFileOrder(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "access.log")
 	var console bytes.Buffer
-	log, err := Open(path, &console)
+	relay := NewConsole(&console)
+	relay.Start()
+	log, err := Open(path, relay)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +79,9 @@ func TestConcurrentLogWritesMirrorInFileOrder(t *testing.T) {
 		})
 	}
 	workers.Wait()
+	if err := relay.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(data, console.Bytes()) || len(events(t, path)) != 30 {
 		t.Fatalf("incomplete or disordered console fanout: %v", err)
@@ -114,4 +120,67 @@ func events(t *testing.T, path string) []Event {
 		result = append(result, event)
 	}
 	return result
+}
+
+type heldConsole struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (sink heldConsole) Write(line []byte) (int, error) {
+	select {
+	case sink.entered <- struct{}{}:
+	default:
+	}
+	<-sink.release
+	return len(line), nil
+}
+
+func TestBlockedConsoleLeavesFileLoggingAvailable(t *testing.T) {
+	sink := heldConsole{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	defer close(sink.release)
+	console := NewConsole(sink)
+	console.Start()
+	path := filepath.Join(t.TempDir(), "access.log")
+	log, err := Open(path, console)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := log.Write(Event{Event: "startup"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sink.entered:
+	case <-time.After(time.Second):
+		t.Fatal("console did not receive startup")
+	}
+
+	written := make(chan error, 1)
+	go func() {
+		for range consoleQueueSize + 1 {
+			if err := log.Write(Event{Event: "request"}); err != nil {
+				written <- err
+				return
+			}
+		}
+		written <- log.Write(Event{Event: "stop"})
+	}()
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a stalled console blocked file appends")
+	}
+	flush, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if err := console.Close(flush); err == nil {
+		t.Fatal("undelivered console logs were not reported")
+	}
+	got := events(t, path)
+	if len(got) != consoleQueueSize+3 || got[len(got)-1].Event != "stop" {
+		t.Fatal("file is missing lines or the stop event")
+	}
 }

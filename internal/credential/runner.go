@@ -149,7 +149,7 @@ func Execute(args []string) error {
 }
 
 func sessionAlive(directory string, parent int) bool {
-	if parent <= 1 || os.Getppid() != parent {
+	if parent <= 0 || os.Getppid() != parent {
 		return false
 	}
 	info, err := os.Stat(directory)

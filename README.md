@@ -13,7 +13,7 @@ sudo ./deploy/launchd/install.sh ./kuri "$(id -un)"
 
 등록에는 관리자 권한이 필요합니다. launchd가 `127.0.0.1:80`과 `[::1]:80`을 엽니다. kuri는 지정한 계정으로 실행됩니다. 첫 HTTP 연결이나 `start` 요청이 들어오면 서버가 시작됩니다. 부팅할 때 바로 실행하려면 설치 명령 끝에 `--eager`를 붙입니다.
 
-launchd는 `/Library/Application Support/kuri/kuri`에 설치한 바이너리를 실행합니다. 소스에서 다시 빌드한 버전을 적용하려면 같은 설치 명령을 실행합니다. 설치 명령은 기존 작업을 종료한 뒤 새 바이너리로 다시 등록합니다.
+launchd는 `/Library/Application Support/kuri/kuri`에 설치한 바이너리를 실행합니다. 소스에서 다시 빌드한 버전을 적용할 때도 같은 설치 명령을 씁니다. 이 명령은 기존 작업을 종료한 뒤 새 바이너리로 작업을 다시 등록합니다.
 
 `stop`으로 현재 프로세스를 종료하면 다음 연결에서 서버를 다시 시작할 수 있습니다. 포트를 닫고 자동 시작을 끄려면 작업 등록을 해제하고 plist를 삭제합니다.
 
@@ -41,7 +41,7 @@ kubeconfig에서 exec 인증을 사용한다면 지정 계정이 터미널 입�
 | 호스트 | 라우팅 |
 | --- | --- |
 | `api.default.dev.kuri.localhost` | `dev` context에서 `default/api`의 기본 포트로 요청을 보냅니다. |
-| `8080.api.default.dev.kuri.localhost` | 같은 Service의 TCP Service 포트 8080으로 요청을 보냅니다. |
+| `8080.api.default.dev.kuri.localhost` | 같은 Service의 TCP 포트 8080으로 요청을 보냅니다. |
 | `api.default.kuri.localhost` | kubeconfig의 `current-context`에서 `default/api`를 찾습니다. |
 
 Service 포트가 하나면 그 포트를 씁니다. 포트가 여러 개면 이름이 `http`인 TCP 포트를 씁니다. 포트 번호를 지정할 때는 Service의 `port`를 사용합니다. kuri는 해당 포트를 Pod의 `targetPort`에 연결합니다.
@@ -54,6 +54,6 @@ printf 'ctx-%s\n' "$(printf %s 'dev.cluster' | shasum -a 256 | cut -c1-16)"
 
 ## 연결과 접근 로그
 
-최초 연결은 60분 동안 유지합니다. 같은 연결에 요청이 들어오면 마지막 요청 시각부터 60초 동안 유지합니다. kuri는 10초마다 `HEAD /`로 연결을 확인하고 만료 전에 끊기면 다시 연결을 시도합니다. Kubernetes API가 잠시 응답하지 않아도 준비된 포워딩은 계속 쓸 수 있습니다.
+최초 연결은 60분 동안 유지합니다. 같은 연결에 요청이 들어오면 만료 시각을 마지막 요청 시각에서 60초 뒤로 설정합니다. kuri는 10초마다 `HEAD /`로 연결을 확인하고 만료 전에 끊기면 다시 연결을 시도합니다. Kubernetes API가 잠시 응답하지 않아도 준비된 포워딩은 계속 쓸 수 있습니다.
 
-`$HOME/.kuri/access.log`에는 요청 결과와 서버 시작 및 종료를 영어로 기록합니다. 형식은 JSON Lines입니다. 새 줄을 저장하기 전에 72시간보다 오래된 로그를 지우고 파일이 100MiB를 넘지 않도록 정리합니다. `state`는 콘솔에만 출력합니다.
+`$HOME/.kuri/access.log`에는 요청 결과와 서버 시작 및 종료를 영어로 기록합니다. 형식은 JSON Lines입니다. 새 줄을 저장하기 전에 72시간보다 오래된 로그를 지우고 파일이 100MiB를 넘지 않도록 정리합니다. `state`는 표준 출력에만 표시합니다. 포그라운드 콘솔 출력이 막혀 대기열이 차면 일부 콘솔 로그를 생략하고 파일 기록을 계속합니다. 서버를 종료할 때는 남은 콘솔 로그가 출력되기를 최대 1초 동안 기다립니다. 표준 오류 출력이 가능하면 누락이나 출력 중단을 알립니다.
