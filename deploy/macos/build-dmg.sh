@@ -34,7 +34,17 @@ mkdir -p -- "$(dirname -- "$output")"
 output_dir=$(cd -- "$(dirname -- "$output")" && pwd)
 output="$output_dir/$(basename -- "$output")"
 build_dir=$(mktemp -d "$output_dir/.kuri-dmg.XXXXXXXX")
-trap 'rm -r -- "$build_dir"' EXIT
+
+cleanup() {
+    local status=$?
+    if [[ $status -ne 0 ]] && ! python3 "$script_dir/detach_build_images.py" "$build_dir"; then
+        printf 'Could not clean up the build. Temporary files remain at %s\n' "$build_dir" >&2
+        exit "$status"
+    fi
+    rm -r -- "$build_dir"
+    exit "$status"
+}
+trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
