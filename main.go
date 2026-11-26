@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -87,6 +88,16 @@ func run(args []string) int {
 		state, err = app.State(ctx)
 		if err == nil {
 			err = cli.WriteState(os.Stdout, state, time.Now())
+		}
+	case len(args) == 1 && args[0] == "__menu_state":
+		state, stateErr := app.State(ctx)
+		err = stateErr
+		if err == nil {
+			view, viewErr := makeMenuState(state)
+			err = viewErr
+			if err == nil {
+				err = json.NewEncoder(os.Stdout).Encode(view)
+			}
 		}
 	case len(args) == 1 && args[0] == "__background":
 		err = app.RunBackground(ctx, os.NewFile(3, "readiness"))

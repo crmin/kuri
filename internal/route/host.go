@@ -55,6 +55,27 @@ func Alias(name string) string {
 	return fmt.Sprintf("ctx-%x", sum[:8])
 }
 
+func ForwardLabel(target Target, defaultPort bool) string {
+	label := target.Service + "." + target.Namespace + "." + Alias(target.Context)
+	if !defaultPort {
+		return strconv.Itoa(int(target.Port)) + "." + label
+	}
+	return label
+}
+
+func (c Contexts) ForwardHost(target Target, defaultPort bool) string {
+	host := ForwardLabel(target, defaultPort) + suffix
+	want := target
+	if defaultPort {
+		want.Port = 0
+	}
+	parsed, err := c.Parse(host)
+	if err != nil || parsed.Target != want {
+		return ""
+	}
+	return host
+}
+
 func NormalizeHost(host string) (string, error) {
 	if strings.Contains(host, ":") {
 		name, port, err := net.SplitHostPort(host)

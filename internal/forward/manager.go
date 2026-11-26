@@ -53,9 +53,12 @@ type Backend interface {
 
 type Row struct {
 	route.Target
-	PortName  string    `json:"port_name"`
-	LocalPort int       `json:"local_port"`
-	Connected time.Time `json:"connected"`
+	PortName    string     `json:"port_name"`
+	LocalPort   int        `json:"local_port"`
+	Connected   time.Time  `json:"connected"`
+	LastAccess  *time.Time `json:"last_access,omitempty"`
+	DefaultPort bool       `json:"default_port,omitempty"`
+	MenuHost    string     `json:"menu_host,omitempty"`
 }
 
 type Manager struct {
@@ -89,10 +92,11 @@ type entry struct {
 	wake     chan struct{}
 
 	// Protected by Manager.mu.
-	changed  chan struct{}
-	deadline time.Time
-	lease    *Lease
-	err      error
+	changed    chan struct{}
+	deadline   time.Time
+	lease      *Lease
+	err        error
+	lastAccess time.Time
 }
 
 func NewManager(backend Backend) *Manager {
@@ -220,12 +224,16 @@ func (m *Manager) await(ctx context.Context, e *entry) (*Lease, error) {
 	for {
 		m.mu.Lock()
 		changed, lease, err := e.changed, e.lease, e.err
+		if err == nil && lease != nil && lease.isAlive() {
+			if err = ctx.Err(); err == nil {
+				e.lastAccess = time.Now()
+			}
+			m.mu.Unlock()
+			return lease, err
+		}
 		m.mu.Unlock()
 		if err != nil {
 			return nil, err
-		}
-		if lease != nil && lease.isAlive() {
-			return lease, ctx.Err()
 		}
 		select {
 		case <-ctx.Done():
@@ -481,7 +489,12 @@ func (m *Manager) Snapshot() []Row {
 	now := time.Now()
 	for _, e := range m.entries {
 		if e.lease != nil && e.lease.isAlive() && now.Before(e.deadline) {
-			rows = append(rows, Row{e.target, e.lease.Destination.PortName, e.lease.LocalPort, e.lease.Connected})
+			lastAccess := e.lastAccess
+			rows = append(rows, Row{
+				Target: e.target, PortName: e.lease.Destination.PortName, LocalPort: e.lease.LocalPort,
+				Connected: e.lease.Connected, LastAccess: &lastAccess,
+				DefaultPort: m.defaults[defaultTarget(e.target)] == e.target.Port,
+			})
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool {

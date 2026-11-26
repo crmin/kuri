@@ -63,6 +63,26 @@ func acquire(t *testing.T, m *Manager, req route.Request) *Lease {
 	return lease
 }
 
+func TestSnapshotTracksLastRequestAndDefault(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := testManager(stubBackend{})
+		defer manager.Close()
+		acquire(t, manager, request("api"))
+		row := manager.Snapshot()[0]
+		if row.LastAccess == nil || !row.DefaultPort {
+			t.Fatalf("unexpected row: %+v", row)
+		}
+		time.Sleep(probeInterval + time.Second)
+		if got := manager.Snapshot()[0]; !got.LastAccess.Equal(*row.LastAccess) {
+			t.Fatal("probe or snapshot changed the request timestamp")
+		}
+		acquire(t, manager, request("api"))
+		if got := manager.Snapshot()[0]; !got.LastAccess.After(*row.LastAccess) || !got.Connected.Equal(row.Connected) {
+			t.Fatalf("reuse did not update only last access: %+v", got)
+		}
+	})
+}
+
 func TestConcurrentColdRequest(t *testing.T) {
 	var resolves, opens atomic.Int64
 	resolving := make(chan struct{})

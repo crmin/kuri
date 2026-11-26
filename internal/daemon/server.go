@@ -88,7 +88,13 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 	stopped := &stopResult{done: make(chan struct{})}
 	go func() {
 		defer close(controlDone)
-		serveRuntimeControl(control, state, manager.Snapshot, stop, stopped)
+		serveRuntimeControl(control, state, func() []forward.Row {
+			rows := manager.Snapshot()
+			for i := range rows {
+				rows[i].MenuHost = contexts.ForwardHost(rows[i].Target, rows[i].DefaultPort)
+			}
+			return rows
+		}, stop, stopped)
 	}()
 
 	var workers sync.WaitGroup
