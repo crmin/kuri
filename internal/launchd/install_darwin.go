@@ -160,6 +160,10 @@ func Register(ctx context.Context, home, activation string) error {
 }
 
 func lockRegistration(ctx context.Context, home string) (*os.File, error) {
+	return lockUserOperation(ctx, home, "install.lock")
+}
+
+func lockUserOperation(ctx context.Context, home, name string) (*os.File, error) {
 	dir := filepath.Join(home, ".kuri")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create kuri runtime directory: %w", err)
@@ -171,7 +175,7 @@ func lockRegistration(ctx context.Context, home string) (*os.File, error) {
 	if !info.IsDir() || info.Mode().Perm()&0022 != 0 || int(info.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
 		return nil, errors.New("kuri runtime directory must be owned by the current macOS account and protected from writes by other users")
 	}
-	path := filepath.Join(dir, "install.lock")
+	path := filepath.Join(dir, name)
 	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open LaunchDaemon registration lock: %w", err)

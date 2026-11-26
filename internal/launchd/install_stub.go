@@ -19,6 +19,19 @@ func InstallStartup(context.Context, io.Writer, io.Writer) error { return startu
 
 func UninstallStartup(context.Context, io.Writer, io.Writer) error { return startupUnavailable() }
 
+type noopLock struct{}
+
+func (noopLock) Close() error { return nil }
+
+func LockLifecycle(context.Context, string) (io.Closer, error) { return noopLock{}, nil }
+func ReadMenuPause() (MenuPause, error)                        { return MenuPause{}, nil }
+func ChangeMenuRegistration(_ context.Context, action, _, _, _ string, _ io.Writer) error {
+	if action == "pause" {
+		return nil
+	}
+	return startupUnavailable()
+}
+
 func startupUnavailable() error {
 	if runtime.GOOS == "darwin" {
 		return errors.New("build kuri with CGO_ENABLED=1 to manage its macOS startup registration")

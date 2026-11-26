@@ -6,6 +6,25 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func TestForwardHostMatchesExplicitContext(t *testing.T) {
+	target := Target{Context: "cloud.prod", Namespace: "ns", Service: "api", Port: 8080}
+	alias := Alias(target.Context)
+	contexts := NewContexts(target.Context, []string{target.Context})
+	if got := contexts.ForwardHost(target, false); got != "8080.api.ns."+alias+".kuri.localhost" {
+		t.Fatal(got)
+	}
+	if got := contexts.ForwardHost(target, true); got != "api.ns."+alias+".kuri.localhost" {
+		t.Fatal(got)
+	}
+	ambiguous := NewContexts(target.Context, []string{target.Context, alias})
+	if _, err := ambiguous.Parse("api.ns.kuri.localhost"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ambiguous.ForwardHost(target, true); got != "" {
+		t.Fatal(got)
+	}
+}
+
 func TestHostForms(t *testing.T) {
 	contexts := NewContexts("dev", []string{"dev", "prod"})
 	for _, tc := range []struct {

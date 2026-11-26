@@ -233,17 +233,32 @@ func (app *App) State(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	defer conn.Close()
-	if err := sendRequest(conn, "state"); err != nil {
-		return State{}, err
-	}
-	state, err := decodeReply(json.NewDecoder(conn))
+	return readState(ctx, conn, pid)
+}
+
+func readState(ctx context.Context, conn *net.UnixConn, pid int) (State, error) {
+	answer, err := readOnlyState(ctx, conn, false)
 	if err != nil {
 		return State{}, err
 	}
-	if state.PID != pid {
+	if answer.State.PID != pid {
 		return State{}, errors.New("control response PID does not match the running process")
 	}
-	return state, nil
+	return answer.State, nil
+}
+
+func readOnlyState(ctx context.Context, conn *net.UnixConn, menu bool) (reply, error) {
+	interrupt := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer interrupt()
+	err := json.NewEncoder(conn).Encode(request{Version: version, Action: "state", Menu: menu})
+	var answer reply
+	if err == nil {
+		answer, err = decodeControlReply(json.NewDecoder(conn))
+	}
+	if err != nil && ctx.Err() != nil {
+		return reply{}, ctx.Err()
+	}
+	return answer, err
 }
 
 func (app *App) Stop(ctx context.Context) (int, error) {
@@ -254,6 +269,10 @@ func (app *App) Stop(ctx context.Context) (int, error) {
 	if state.PID == 0 || state.Mode != background {
 		return 0, ErrNoBackground
 	}
+	return app.stopInstance(ctx, state, nil)
+}
+
+func (app *App) stopInstance(ctx context.Context, state State, exited func(context.Context) error) (int, error) {
 	wait, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
 	conn, pid, err := app.connectRuntime(wait)
@@ -267,11 +286,14 @@ func (app *App) Stop(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	defer conn.Close()
-	exited, release, err := subscribeExit(pid)
-	if err != nil {
-		return 0, fmt.Errorf("watch background process %d: %w", pid, err)
+	if exited == nil {
+		var release func()
+		exited, release, err = subscribeExit(pid)
+		if err != nil {
+			return 0, fmt.Errorf("watch background process %d: %w", pid, err)
+		}
+		defer release()
 	}
-	defer release()
 
 	if err := json.NewEncoder(conn).Encode(request{Version: version, Action: "stop", Token: state.Token}); err != nil {
 		return 0, err

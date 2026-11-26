@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
-	"sort"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -53,9 +53,12 @@ type Backend interface {
 
 type Row struct {
 	route.Target
-	PortName  string    `json:"port_name"`
-	LocalPort int       `json:"local_port"`
-	Connected time.Time `json:"connected"`
+	PortName    string     `json:"port_name"`
+	LocalPort   int        `json:"local_port"`
+	Connected   time.Time  `json:"connected"`
+	LastAccess  *time.Time `json:"last_access,omitempty"`
+	DefaultPort bool       `json:"default_port,omitempty"`
+	MenuHost    string     `json:"menu_host,omitempty"`
 }
 
 type Manager struct {
@@ -89,10 +92,11 @@ type entry struct {
 	wake     chan struct{}
 
 	// Protected by Manager.mu.
-	changed  chan struct{}
-	deadline time.Time
-	lease    *Lease
-	err      error
+	changed    chan struct{}
+	deadline   time.Time
+	lease      *Lease
+	err        error
+	lastAccess time.Time
 }
 
 func NewManager(backend Backend) *Manager {
@@ -220,12 +224,16 @@ func (m *Manager) await(ctx context.Context, e *entry) (*Lease, error) {
 	for {
 		m.mu.Lock()
 		changed, lease, err := e.changed, e.lease, e.err
+		if err == nil && lease != nil && lease.isAlive() {
+			if err = ctx.Err(); err == nil {
+				e.lastAccess = time.Now()
+			}
+			m.mu.Unlock()
+			return lease, err
+		}
 		m.mu.Unlock()
 		if err != nil {
 			return nil, err
-		}
-		if lease != nil && lease.isAlive() {
-			return lease, ctx.Err()
 		}
 		select {
 		case <-ctx.Done():
@@ -476,28 +484,32 @@ func (m *Manager) release(e *entry, lease *Lease) {
 
 func (m *Manager) Snapshot() []Row {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	var rows []Row
 	now := time.Now()
 	for _, e := range m.entries {
-		if e.lease != nil && e.lease.isAlive() && now.Before(e.deadline) {
-			rows = append(rows, Row{e.target, e.lease.Destination.PortName, e.lease.LocalPort, e.lease.Connected})
+		if isActive(e, now) {
+			rows = append(rows, m.snapshotRow(e))
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		a, b := rows[i], rows[j]
-		if a.Context != b.Context {
-			return a.Context < b.Context
-		}
-		if a.Namespace != b.Namespace {
-			return a.Namespace < b.Namespace
-		}
-		if a.Service != b.Service {
-			return a.Service < b.Service
-		}
-		return a.Port < b.Port
+	m.mu.Unlock()
+	slices.SortFunc(rows, func(a, b Row) int {
+		return compareTarget(a.Target, b.Target)
 	})
 	return rows
+}
+
+func isActive(e *entry, now time.Time) bool {
+	return e.lease != nil && e.lease.isAlive() && now.Before(e.deadline)
+}
+
+// snapshotRow copies the mutable entry into the caller's snapshot. Hold m.mu.
+func (m *Manager) snapshotRow(e *entry) Row {
+	lastAccess := e.lastAccess
+	return Row{
+		Target: e.target, PortName: e.lease.Destination.PortName, LocalPort: e.lease.LocalPort,
+		Connected: e.lease.Connected, LastAccess: &lastAccess,
+		DefaultPort: m.defaults[defaultTarget(e.target)] == e.target.Port,
+	}
 }
 
 func (m *Manager) Close() {

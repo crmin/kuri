@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/forward"
+	"github.com/crmin/kuri/internal/menuview"
 )
 
 const (
@@ -43,13 +44,15 @@ type request struct {
 	Version int    `json:"version"`
 	Action  string `json:"action"`
 	Token   string `json:"token,omitempty"`
+	Menu    bool   `json:"menu,omitempty"`
 }
 
 type reply struct {
-	Version int    `json:"version"`
-	State   State  `json:"state"`
-	Code    string `json:"code,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Version int             `json:"version"`
+	State   State           `json:"state"`
+	Code    string          `json:"code,omitempty"`
+	Error   string          `json:"error,omitempty"`
+	Menu    *menuview.State `json:"menu,omitempty"`
 }
 
 func writeReply(out io.Writer, value reply) error {
@@ -75,27 +78,32 @@ func failure(err error) reply {
 }
 
 func decodeReply(decoder *json.Decoder) (State, error) {
+	answer, err := decodeControlReply(decoder)
+	return answer.State, err
+}
+
+func decodeControlReply(decoder *json.Decoder) (reply, error) {
 	var answer reply
 	if err := decoder.Decode(&answer); err != nil {
-		return State{}, err
+		return reply{}, err
 	}
 	if answer.Version != version {
-		return State{}, ErrIncompatible
+		return reply{}, ErrIncompatible
 	}
 	if answer.Error == "" {
-		return answer.State, nil
+		return answer, nil
 	}
 	switch answer.Code {
 	case "not_running":
-		return State{}, ErrNoBackground
+		return reply{}, ErrNoBackground
 	case "already_running":
-		return State{}, ErrAlreadyRunning
+		return reply{}, ErrAlreadyRunning
 	case "incompatible":
-		return State{}, ErrIncompatible
+		return reply{}, ErrIncompatible
 	case "bind_permission":
-		return State{}, errBindPermission
+		return reply{}, errBindPermission
 	default:
-		return State{}, errors.New(answer.Error)
+		return reply{}, errors.New(answer.Error)
 	}
 }
 

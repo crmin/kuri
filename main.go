@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/crmin/kuri/internal/credential"
 	"github.com/crmin/kuri/internal/daemon"
 	"github.com/crmin/kuri/internal/launchd"
+	"github.com/crmin/kuri/internal/menuview"
 )
 
 func main() {
@@ -63,18 +65,25 @@ func run(args []string) int {
 
 	switch {
 	case len(args) == 0:
-		err = app.RunForeground(ctx)
+		paused, pauseErr := launchd.MenuPaused()
+		err = pauseErr
+		if err == nil && paused {
+			err = errors.New("Run kuri start to resume the paused registration.")
+		}
+		if err == nil {
+			err = app.RunForeground(ctx)
+		}
 	case len(args) == 1 && args[0] == "start" && os.Getenv("KURI_LAUNCHD_START") == "1":
 		err = runActivated(ctx, app, true)
 	case len(args) == 1 && args[0] == "start":
 		var pid int
-		pid, err = app.Start(ctx)
+		pid, err = startBackground(ctx, app, home)
 		if err == nil {
 			fmt.Printf("Started kuri (PID %d).\n", pid)
 		}
 	case len(args) == 1 && args[0] == "stop":
 		var pid int
-		pid, err = app.Stop(ctx)
+		pid, err = stopBackground(ctx, app, home)
 		if errors.Is(err, daemon.ErrNoBackground) {
 			fmt.Fprintln(os.Stdout, err)
 			return 1
@@ -88,6 +97,14 @@ func run(args []string) int {
 		if err == nil {
 			err = cli.WriteState(os.Stdout, state, time.Now())
 		}
+	case len(args) == 1 && args[0] == "__menu_state":
+		var view menuview.State
+		view, err = app.MenuState(ctx)
+		if err == nil {
+			err = json.NewEncoder(os.Stdout).Encode(view)
+		}
+	case len(args) >= 1 && args[0] == "__menu_quit":
+		err = quitMenu(ctx, app, home, args[1:])
 	case len(args) == 1 && args[0] == "__background":
 		err = app.RunBackground(ctx, os.NewFile(3, "readiness"))
 	case len(args) >= 1 && args[0] == "__launchd" && (len(args) == 1 || (len(args) == 2 && args[1] == "--eager")):

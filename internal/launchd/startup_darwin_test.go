@@ -258,6 +258,129 @@ func TestStartupLinkUpdateWaitsForTheRegistrationLock(t *testing.T) {
 	system.checkLink(t, second)
 }
 
+func TestQuitPauseUsesBootSession(t *testing.T) {
+	s := newStartupTestSystem(t)
+	path := s.executable(t, "app")
+	if err := os.WriteFile(filepath.Join(s.root, "boot"), []byte("first-boot\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := s.run(t, "install", path, true); code != 0 {
+		t.Fatalf("install: %d %s", code, out)
+	}
+	menu := func(action, operation, expected string, elevated bool, want int) {
+		t.Helper()
+		out, code := s.runScript(t, elevated, "--menu-"+action, filepath.Join(s.root, "home"), s.account, s.template(), operation, expected)
+		if code != want {
+			t.Fatalf("%s: %d %s", action, code, out)
+		}
+	}
+	menu("pause", "Pause1", "", false, 77)
+	menu("pause", "Pause1", "", true, 0)
+	if _, err := os.Stat(filepath.Join(s.root, "loaded")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("job remained loaded: %v", err)
+	}
+	if out, code := s.run(t, "install", path, true); code == 0 || !strings.Contains(out, "kuri start") {
+		t.Fatalf("paused install: %d %s", code, out)
+	}
+	s.flag(t, "disabled")
+	menu("resume", "Resume1", "Pause1", true, 1)
+	if err := os.Remove(filepath.Join(s.root, "disabled")); err != nil {
+		t.Fatal(err)
+	}
+	menu("resume", "Resume1", "Pause1", true, 0)
+	s.flag(t, "fail-menu-finish")
+	menu("finish-resume", "Resume1", "", true, 5)
+	menu("rollback", "AnotherResume", "", true, 0)
+	if _, err := os.Stat(filepath.Join(s.root, "loaded")); err != nil {
+		t.Fatal("another transaction must not change the loaded job")
+	}
+	menu("rollback", "Resume1", "", true, 0)
+	menu("resume", "DelayedStart", "Pause1", true, 1)
+	menu("resume", "Resume2", "Resume1", true, 0)
+	menu("finish-resume", "Resume2", "", true, 0)
+	if out, code := s.run(t, "install", path, true); code != 0 {
+		t.Fatalf("completed resume blocks install: %d %s", code, out)
+	}
+	// Even when the finish reply is lost, the original operation can roll back.
+	menu("rollback", "Resume2", "", true, 0)
+	menu("resume", "Resume3", "Resume2", true, 0)
+	menu("finish-resume", "Resume3", "", true, 0)
+	menu("pause", "Pause2", "", true, 0)
+	if err := os.WriteFile(filepath.Join(s.root, "boot"), []byte("second-boot\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	menu("resume", "Resume4", "Pause2", true, 1)
+	if out, code := s.run(t, "install", path, true); code != 0 {
+		t.Fatalf("stale pause blocks install: %d %s", code, out)
+	}
+	if got := s.changes(t); got != "bootstrap\nbootout\nbootstrap\nbootout\nbootstrap\nbootout\nbootstrap\nbootout\n" {
+		t.Fatalf("unexpected service changes: %q", got)
+	}
+}
+
+func TestMenuPausePreservesProcessObservationOnRetry(t *testing.T) {
+	s := newStartupTestSystem(t)
+	for name, text := range map[string]string{"boot": "boot-id\n", "process-birth": "First process\n"} {
+		if err := os.WriteFile(filepath.Join(s.root, name), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, code := s.run(t, "install", s.executable(t, "app"), true); code != 0 {
+		t.Fatalf("install: %d %s", code, out)
+	}
+	if out, code := s.runScript(t, true, "--menu-pause", s.root, s.account, s.template(), "BadHome", ""); code != 1 || !strings.Contains(out, "different home") {
+		t.Fatalf("mismatched home: %d %s", code, out)
+	}
+	loaded := filepath.Join(s.root, "loaded")
+	data, err := os.ReadFile(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(loaded, append(data, []byte("\tpid = 909\n")...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.flag(t, "fail-process-observation")
+	pause := func(operation string) (string, int) {
+		return s.runScript(t, true, "--menu-pause", filepath.Join(s.root, "home"), s.account, s.template(), operation, "")
+	}
+	for _, operation := range []string{"FirstQuit", "RetryQuit"} {
+		if out, code := pause(operation); code == 0 || !strings.Contains(out, "Could not observe") {
+			t.Fatalf("%s lost the process: %d %s", operation, code, out)
+		}
+		data, err := os.ReadFile(filepath.Join(s.root, "support", ".menu-pause"))
+		if err != nil || !strings.Contains(string(data), "\npausing\n"+operation+"\n909\nFirst process\n") {
+			t.Fatalf("%s state: %s %v", operation, data, err)
+		}
+	}
+	if err := os.Remove(filepath.Join(s.root, "fail-process-observation")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.root, "process-birth"), []byte("A different process\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := pause("FinalQuit"); code != 0 {
+		t.Fatalf("confirm exit after PID reuse: %d %s", code, out)
+	}
+	if got := s.changes(t); got != "bootstrap\nbootout\n" {
+		t.Fatalf("unexpected mutations: %q", got)
+	}
+}
+
+func TestCurrentMenuPauseRecord(t *testing.T) {
+	for _, tc := range []struct {
+		boot            string
+		uid             int
+		paused, invalid bool
+	}{
+		{"boot-a", 501, true, false}, {"boot-b", 501, false, false}, {"boot-a", 502, false, true},
+	} {
+		paused, err := currentMenuPause("boot-a\n501\ndigest\npaused\n", tc.boot, tc.uid)
+		if paused != tc.paused || (err != nil) != tc.invalid {
+			t.Fatalf("unexpected record result: %v %v", paused, err)
+		}
+	}
+}
+
 type startupTestSystem struct {
 	root, account, link, plist, script string
 }
@@ -288,13 +411,27 @@ func newStartupTestSystem(t *testing.T) startupTestSystem {
 else
     exec /usr/bin/id "$@"
 fi`,
-		"dscl": `printf 'NFSHomeDirectory: %s/home\n' "$TEST_ROOT"`,
+		"dscl":   `printf 'NFSHomeDirectory: %s/home\n' "$TEST_ROOT"`,
+		"sysctl": `exec /bin/cat "$TEST_ROOT/boot"`,
+		"ps": `if [ ! -e "$TEST_ROOT/loaded" ] && [ -e "$TEST_ROOT/fail-process-observation" ]; then
+    printf 'observation failed\n' >&2
+    exit 2
+fi
+if [ ! -e "$TEST_ROOT/process-birth" ]; then exit 1; fi
+exec /bin/cat "$TEST_ROOT/process-birth"`,
 		"sudo": `shift 4
 exec "$@"`,
 		"install": `shift 4
 exec /usr/bin/install "$@"`,
 		"lockf": `: > "$TEST_ROOT/lock-attempt"
 exec /usr/bin/lockf "$@"`,
+		"mv": `if [ "$#" -eq 3 ] && [ "$3" = "$TEST_ROOT/support/.menu-pause" ] && [ -e "$TEST_ROOT/fail-menu-finish" ]; then
+    if /usr/bin/grep -qx completed "$2"; then
+        /bin/rm "$TEST_ROOT/fail-menu-finish"
+        exit 5
+    fi
+fi
+exec /bin/mv "$@"`,
 		"rm": `for arg in "$@"; do
     if [ "$arg" = "$TEST_ROOT/bin/kuri" ] && [ -e "$TEST_ROOT/fail-remove-link" ]; then
         /bin/rm "$TEST_ROOT/fail-remove-link"
@@ -348,10 +485,13 @@ esac`,
 		"/private/var/tmp/kuri-", filepath.Join(root, "tmp", "kuri-"),
 		"/usr/bin/id", filepath.Join(root, "id"),
 		"/usr/bin/dscl", filepath.Join(root, "dscl"),
+		"/usr/sbin/sysctl", filepath.Join(root, "sysctl"),
+		"/bin/ps", filepath.Join(root, "ps"),
 		"/usr/bin/sudo", filepath.Join(root, "sudo"),
 		"/usr/bin/install", filepath.Join(root, "install"),
 		"/usr/bin/lockf", filepath.Join(root, "lockf"),
 		"/bin/launchctl", filepath.Join(root, "launchctl"),
+		"/bin/mv", filepath.Join(root, "mv"),
 		"/bin/rm", filepath.Join(root, "rm"),
 		`'%u' "$1")" -eq 0`, `'%u' "$1")" -eq `+uid,
 		`trusted_path "$binary"`, `true`,

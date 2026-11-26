@@ -63,6 +63,64 @@ func acquire(t *testing.T, m *Manager, req route.Request) *Lease {
 	return lease
 }
 
+func TestSnapshotTracksLastRequestAndDefault(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := testManager(stubBackend{})
+		defer manager.Close()
+		acquire(t, manager, request("api"))
+		row := manager.Snapshot()[0]
+		if row.LastAccess == nil || !row.DefaultPort {
+			t.Fatalf("unexpected row: %+v", row)
+		}
+		time.Sleep(probeInterval + time.Second)
+		if got := manager.Snapshot()[0]; !got.LastAccess.Equal(*row.LastAccess) {
+			t.Fatal("probe or snapshot changed the request timestamp")
+		}
+		acquire(t, manager, request("api"))
+		if got := manager.Snapshot()[0]; !got.LastAccess.After(*row.LastAccess) || !got.Connected.Equal(row.Connected) {
+			t.Fatalf("reuse did not update only last access: %+v", got)
+		}
+	})
+}
+
+func TestRecentSnapshotReturnsCountAndLatestRoutes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := newManager(stubBackend{}, 30000, 30010, func(int) error { return nil }, func(context.Context, *Lease) error { return nil })
+		defer manager.Close()
+		for _, name := range []string{"g", "f", "e", "d", "c", "b", "a"} {
+			acquire(t, manager, request(name))
+		}
+		count, rows := manager.RecentSnapshot(5)
+		if count != 7 || len(rows) != 5 || rows[0].Service != "a" || rows[4].Service != "e" {
+			t.Fatalf("count %d, rows %+v", count, rows)
+		}
+		time.Sleep(time.Second)
+		acquire(t, manager, request("f"))
+		count, rows = manager.RecentSnapshot(5)
+		if count != 7 || len(rows) != 5 || rows[0].Service != "f" || rows[4].Service != "d" {
+			t.Fatalf("count %d, rows %+v", count, rows)
+		}
+	})
+}
+
+func TestCloseReleasesEveryActiveForward(t *testing.T) {
+	var closed atomic.Int64
+	manager := testManager(stubBackend{open: func(context.Context, Destination, int) (Tunnel, error) {
+		done := make(chan struct{})
+		return Tunnel{Done: done, Close: func() { close(done); closed.Add(1) }}, nil
+	}})
+	defer manager.Close()
+	acquire(t, manager, request("first"))
+	acquire(t, manager, request("second"))
+	if got := len(manager.Snapshot()); got != 2 {
+		t.Fatalf("active forwards: %d", got)
+	}
+	manager.Close()
+	if closed.Load() != 2 || len(manager.Snapshot()) != 0 {
+		t.Fatalf("close left active forwards: %d", closed.Load())
+	}
+}
+
 func TestConcurrentColdRequest(t *testing.T) {
 	var resolves, opens atomic.Int64
 	resolving := make(chan struct{})
