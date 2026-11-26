@@ -52,7 +52,7 @@ func (k *Kubernetes) client(name string) (*coreclient.CoreV1Client, *rest.Config
 		return nil, nil, errors.New("unknown Kubernetes context")
 	}
 	config, err := clientcmd.NewNonInteractiveClientConfig(
-		*k.config, name, &clientcmd.ConfigOverrides{}, k.loader,
+		*k.config.DeepCopy(), name, &clientcmd.ConfigOverrides{}, k.loader,
 	).ClientConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("load Kubernetes settings for context %q: %w", name, err)
