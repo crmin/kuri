@@ -33,6 +33,7 @@ const (
 
 type menuPresentation struct {
 	menuview.State
+	Uptime   string `json:"uptime,omitempty"`
 	Known    bool   `json:"known"`
 	Busy     bool   `json:"busy"`
 	Quitting bool   `json:"quitting"`
@@ -76,6 +77,9 @@ func main() {
 }
 
 func renderNative(view menuPresentation) {
+	if view.Started != nil && view.PID > 0 {
+		view.Uptime = formatUptime(time.Since(*view.Started))
+	}
 	data, err := json.Marshal(view)
 	if err != nil {
 		return

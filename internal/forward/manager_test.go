@@ -83,6 +83,24 @@ func TestSnapshotTracksLastRequestAndDefault(t *testing.T) {
 	})
 }
 
+func TestCloseReleasesEveryActiveForward(t *testing.T) {
+	var closed atomic.Int64
+	manager := testManager(stubBackend{open: func(context.Context, Destination, int) (Tunnel, error) {
+		done := make(chan struct{})
+		return Tunnel{Done: done, Close: func() { close(done); closed.Add(1) }}, nil
+	}})
+	defer manager.Close()
+	acquire(t, manager, request("first"))
+	acquire(t, manager, request("second"))
+	if got := len(manager.Snapshot()); got != 2 {
+		t.Fatalf("active forwards: %d", got)
+	}
+	manager.Close()
+	if closed.Load() != 2 || len(manager.Snapshot()) != 0 {
+		t.Fatalf("close left active forwards: %d", closed.Load())
+	}
+}
+
 func TestConcurrentColdRequest(t *testing.T) {
 	var resolves, opens atomic.Int64
 	resolving := make(chan struct{})

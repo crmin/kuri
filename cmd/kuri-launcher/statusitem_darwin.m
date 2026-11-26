@@ -2,6 +2,7 @@
 
 #import <AppKit/AppKit.h>
 #import "statusitem_darwin.h"
+#import "popover_darwin.h"
 
 extern void kuriGoReady(void);
 extern void kuriGoVisible(int visible);
@@ -10,6 +11,7 @@ extern void kuriGoAction(int action);
 @interface KuriStatus : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @property(nonatomic, retain) NSStatusItem *item;
 @property(nonatomic, retain) NSMenu *rightMenu;
+@property(nonatomic, retain) KuriPopover *popover;
 @property(nonatomic, retain) NSMenuItem *serverItem;
 @property(nonatomic, retain) NSMenuItem *errorItem;
 @property(nonatomic, retain) NSDictionary *view;
@@ -32,6 +34,9 @@ static KuriStatus *application;
     NSClickGestureRecognizer *right = [[[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(showRightMenu:)] autorelease];
     right.buttonMask = 0x2;
     [button addGestureRecognizer:right];
+    button.target = self;
+    button.action = @selector(showPopover:);
+    self.popover = [[[KuriPopover alloc] init] autorelease];
 
     self.rightMenu = [[[NSMenu alloc] initWithTitle:@"Kuri"] autorelease];
     self.rightMenu.delegate = self;
@@ -55,6 +60,7 @@ static KuriStatus *application;
 - (void)applyView:(NSDictionary *)view {
     NSAssert([NSThread isMainThread], @"AppKit must run on the main thread.");
     self.view = view;
+    [self.popover applyView:view];
     NSString *mode = view[@"mode"];
     BOOL known = [view[@"known"] boolValue];
     BOOL busy = [view[@"busy"] boolValue];
@@ -71,7 +77,10 @@ static KuriStatus *application;
     self.item.button.toolTip = error.length ? [@"Kuri: " stringByAppendingString:error] : @"Kuri";
 }
 
+- (void)showPopover:(id)sender { [self.popover toggleAt:self.item.button]; }
+
 - (void)showRightMenu:(id)sender {
+    [self.popover close];
     NSStatusBarButton *button = self.item.button;
     [self.rightMenu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, NSHeight(button.bounds)) inView:button];
 }
@@ -100,16 +109,22 @@ void kuriRun(void) {
 }
 
 void kuriRender(const char *json) {
-    NSString *text = [[NSString alloc] initWithUTF8String:json];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSDictionary *view = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
-        if ([view isKindOfClass:[NSDictionary class]]) [application applyView:view];
-    });
-    [text release];
+    @autoreleasepool {
+        NSString *text = [[NSString alloc] initWithUTF8String:json];
+        CFRunLoopRef loop = CFRunLoopGetMain();
+        NSArray *modes = @[NSDefaultRunLoopMode, NSEventTrackingRunLoopMode];
+        CFRunLoopPerformBlock(loop, (CFArrayRef)modes, ^{
+            NSDictionary *view = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+            if ([view isKindOfClass:[NSDictionary class]]) [application applyView:view];
+        });
+        CFRunLoopWakeUp(loop);
+        [text release];
+    }
 }
 
 void kuriTerminate(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        [application.popover close];
         [[NSStatusBar systemStatusBar] removeStatusItem:application.item];
         NSApp.delegate = nil;
         [NSApp terminate:nil];

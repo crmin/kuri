@@ -22,6 +22,8 @@ Finder에서 앱이 시작되지 않으면 `~/Library/Logs/kuri/startup.log`에�
 
 메뉴 막대의 kuri 아이콘을 우클릭하면 Quit와 서버 상태에 맞는 Start 또는 Stop을 사용할 수 있습니다. Stop은 현재 프록시와 포트포워딩을 종료합니다. Quit는 서버와 포트포워딩 정리를 확인하고 앱을 닫습니다. 이 부팅 세션에서는 앱을 다시 열거나 새 CLI의 `kuri start`를 실행할 때까지 HTTP 자동 시작을 차단합니다. 시스템 LaunchDaemon을 일시 중지하거나 재개할 때 관리자 인증이 필요할 수 있습니다.
 
+아이콘을 좌클릭하면 서버 PID와 가동 시간, 전체 활성 포트포워딩 수를 확인할 수 있습니다. 최근 사용한 포워딩은 최대 5개까지 표시됩니다. 스위치로 서버를 시작하거나 중지합니다. 포워딩 항목을 누르면 `kuri.localhost` URL을 클립보드에 복사합니다. 팝오버의 Quit 또는 Command+Q로 서버와 앱을 종료합니다. 실행 중인 데몬이 최근 접속 시각을 보내지 않으면 목록에 `Recent activity unavailable`이 표시됩니다.
+
 ### DMG 빌드
 
 macOS 14 이상, Go 1.27.3, macOS Command Line Tools, Python 3.11 이상이 필요합니다. 저장소 루트에서 실행합니다.
