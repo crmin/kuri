@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/cli"
+	"github.com/crmin/kuri/internal/credential"
 	"github.com/crmin/kuri/internal/daemon"
 	"github.com/crmin/kuri/internal/launchd"
 )
@@ -19,6 +20,13 @@ func main() {
 }
 
 func run(args []string) int {
+	if len(args) > 0 && args[0] == credential.Argument {
+		if err := credential.Execute(args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) == 1 && args[0] == "help" {
 		if err := cli.WriteHelp(os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)

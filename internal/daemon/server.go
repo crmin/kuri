@@ -38,6 +38,10 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 	if err != nil {
 		return err
 	}
+	if err := kube.StartCredentials(dir, app.detached); err != nil {
+		return err
+	}
+	defer kube.StopCredentials()
 	manager := forward.NewManager(kube)
 	defer manager.Close()
 	logger, err := accesslog.Open(filepath.Join(dir, "access.log"), mirror)
@@ -98,13 +102,14 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 
 	drain(server, &group, cancelRequests, shutdownTimeout)
 	workers.Wait()
+	credentialErr := kube.StopCredentials()
 	manager.Close()
 	logErr := logger.Write(accesslog.Event{Event: "stop", PID: state.PID, Mode: mode})
 	stopped.err = logErr
 	close(stopped.done)
 	_ = control.Close()
 	<-controlDone
-	return errors.Join(err, logErr)
+	return errors.Join(err, credentialErr, logErr)
 }
 
 func lockRuntime(directory string) (*os.File, error) {

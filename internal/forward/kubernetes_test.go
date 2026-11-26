@@ -76,6 +76,14 @@ func TestExecConfigIsIsolatedAcrossContexts(t *testing.T) {
 		},
 		loader: &clientcmd.ClientConfigLoadingRules{},
 	}
+	first, _, err := kube.client("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _, err := kube.client("a")
+	if err != nil || first != again {
+		t.Fatalf("context did not reuse its lookup client: %v", err)
+	}
 	var requests sync.WaitGroup
 	for range 8 {
 		for _, name := range []string{"a", "b"} {

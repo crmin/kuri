@@ -19,6 +19,7 @@ import (
 
 type App struct {
 	home, activation string
+	detached         bool
 	stdout, stderr   io.Writer
 }
 
@@ -169,7 +170,9 @@ func (app *App) RunBackground(ctx context.Context, readiness *os.File) error {
 		return err
 	}
 	announced := false
-	err = app.serve(ctx, background, listeners, nil, func(state State) error {
+	detached := *app
+	detached.detached = true
+	err = detached.serve(ctx, background, listeners, nil, func(state State) error {
 		announced = true
 		err := writeReply(readiness, reply{State: state})
 		_ = readiness.Close()

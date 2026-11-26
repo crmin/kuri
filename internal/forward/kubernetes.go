@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
+	"github.com/crmin/kuri/internal/credential"
 	"github.com/crmin/kuri/internal/route"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -30,8 +32,17 @@ import (
 var errRouteUnavailable = errors.New("the Kubernetes service port is unavailable")
 
 type Kubernetes struct {
-	config *clientconfig.Config
-	loader *clientcmd.ClientConfigLoadingRules
+	config      *clientconfig.Config
+	loader      *clientcmd.ClientConfigLoadingRules
+	credentials *credential.Runner
+
+	mu      sync.Mutex
+	clients map[string]contextClient
+}
+
+type contextClient struct {
+	client *coreclient.CoreV1Client
+	config *rest.Config
 }
 
 func LoadKubernetes(filename string) (*Kubernetes, route.Contexts, error) {
@@ -44,10 +55,38 @@ func LoadKubernetes(filename string) (*Kubernetes, route.Contexts, error) {
 	for name := range config.Contexts {
 		names = append(names, name)
 	}
-	return &Kubernetes{config, loader}, route.NewContexts(config.CurrentContext, names), nil
+	return &Kubernetes{config: config, loader: loader}, route.NewContexts(config.CurrentContext, names), nil
+}
+
+// StartCredentials is called before serving requests. Non-exec kubeconfigs
+// do not need a helper session or an executable copy.
+func (k *Kubernetes) StartCredentials(runtimeDir string, retainExecutable bool) error {
+	for _, info := range k.config.AuthInfos {
+		if info != nil && info.Exec != nil {
+			runner, err := credential.New(runtimeDir, retainExecutable)
+			if err != nil {
+				return fmt.Errorf("prepare credential helper: %w", err)
+			}
+			k.credentials = runner
+			break
+		}
+	}
+	return nil
+}
+
+func (k *Kubernetes) StopCredentials() error {
+	if k.credentials != nil {
+		return k.credentials.Close()
+	}
+	return nil
 }
 
 func (k *Kubernetes) client(name string) (*coreclient.CoreV1Client, *rest.Config, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if existing, ok := k.clients[name]; ok {
+		return existing.client, existing.config, nil
+	}
 	if k.config.Contexts[name] == nil {
 		return nil, nil, errors.New("unknown Kubernetes context")
 	}
@@ -57,10 +96,19 @@ func (k *Kubernetes) client(name string) (*coreclient.CoreV1Client, *rest.Config
 	if err != nil {
 		return nil, nil, fmt.Errorf("load Kubernetes settings for context %q: %w", name, err)
 	}
+	if config.ExecProvider != nil && k.credentials != nil {
+		if err := k.credentials.Wrap(config.ExecProvider); err != nil {
+			return nil, nil, err
+		}
+	}
 	client, err := coreclient.NewForConfig(config)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
+	if k.clients == nil {
+		k.clients = make(map[string]contextClient)
+	}
+	k.clients[name] = contextClient{client: client, config: config}
 	return client, config, nil
 }
 
@@ -182,10 +230,11 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 }
 
 func (k *Kubernetes) Open(ctx context.Context, dest Destination, port int) (Tunnel, error) {
-	client, config, err := k.client(dest.Context)
+	client, baseConfig, err := k.client(dest.Context)
 	if err != nil {
 		return Tunnel{}, err
 	}
+	config := *baseConfig
 	url := client.RESTClient().Post().Namespace(dest.Namespace).Resource("pods").Name(dest.Pod).SubResource("portforward").URL()
 
 	// The readiness context bounds the handshake. Once ready, the tunnel has
@@ -196,12 +245,12 @@ func (k *Kubernetes) Open(ctx context.Context, dest Destination, port int) (Tunn
 			return next.RoundTrip(request.WithContext(lifetime))
 		})
 	})
-	rt, upgrader, err := spdy.RoundTripperFor(config)
+	rt, upgrader, err := spdy.RoundTripperFor(&config)
 	if err != nil {
 		stop()
 		return Tunnel{}, fmt.Errorf("configure SPDY port forward: %w", err)
 	}
-	websocket, err := portforward.NewSPDYOverWebsocketDialerForStreamingWithLogger(logr.Discard(), url, config)
+	websocket, err := portforward.NewSPDYOverWebsocketDialerForStreamingWithLogger(logr.Discard(), url, &config)
 	if err != nil {
 		stop()
 		return Tunnel{}, fmt.Errorf("configure WebSocket port forward: %w", err)
