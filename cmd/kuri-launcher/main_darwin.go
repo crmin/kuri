@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -12,6 +14,10 @@ import (
 func main() {
 	if err := start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not start kuri: %v\n", err)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() > 0 {
+			os.Exit(exit.ExitCode())
+		}
 		os.Exit(1)
 	}
 }
@@ -35,5 +41,8 @@ func start() error {
 		return strings.HasPrefix(entry, "PATH=") || strings.HasPrefix(entry, "KURI_LAUNCHD_START=")
 	})
 	env = append(env, "PATH="+strings.Join(path, string(os.PathListSeparator)))
+	if stderrIsDiscarded() {
+		return startWithFailureLog(binary, env)
+	}
 	return syscall.Exec(binary, []string{binary, "start"}, env)
 }

@@ -18,6 +18,8 @@ kuri forwards HTTP requests from loopback port 80 on macOS to Kubernetes Service
 /Applications/kuri.app/Contents/MacOS/kuri status
 ```
 
+Finder에서 앱이 시작되지 않으면 `~/Library/Logs/kuri/startup.log`에서 최근 실패 원인을 확인합니다. kuri는 이 파일에 오류를 최대 64 KiB까지 기록합니다.
+
 ### DMG 빌드
 
 macOS 14 이상, Go 1.27.3, macOS Command Line Tools, Python 3.11 이상이 필요합니다. 저장소 루트에서 실행합니다.
