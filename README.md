@@ -20,6 +20,8 @@ kuri forwards HTTP requests from loopback port 80 on macOS to Kubernetes Service
 
 Finder에서 앱이 시작되지 않으면 `~/Library/Logs/kuri/startup.log`에서 최근 실패 원인을 확인합니다. kuri는 이 파일에 오류를 최대 64 KiB까지 기록합니다.
 
+메뉴 막대의 kuri 아이콘을 우클릭하면 Quit와 서버 상태에 맞는 Start 또는 Stop을 사용할 수 있습니다. Stop은 현재 프록시와 포트포워딩을 종료합니다. Quit는 서버와 포트포워딩 정리를 확인하고 앱을 닫습니다. 이 부팅 세션에서는 앱을 다시 열거나 새 CLI의 `kuri start`를 실행할 때까지 HTTP 자동 시작을 차단합니다. 시스템 LaunchDaemon을 일시 중지하거나 재개할 때 관리자 인증이 필요할 수 있습니다.
+
 ### DMG 빌드
 
 macOS 14 이상, Go 1.27.3, macOS Command Line Tools, Python 3.11 이상이 필요합니다. 저장소 루트에서 실행합니다.

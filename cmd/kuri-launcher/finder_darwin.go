@@ -1,47 +1,15 @@
+//go:build cgo
+
 package main
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"syscall"
 )
 
 const startupLogLimit = 64 * 1024
-
-func stderrIsDiscarded() bool {
-	stderr, err := os.Stderr.Stat()
-	if err != nil {
-		return false
-	}
-	discard, err := os.Stat(os.DevNull)
-	return err == nil && os.SameFile(stderr, discard)
-}
-
-func startWithFailureLog(binary string, env []string) error {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	var output startupOutput
-	cmd := exec.CommandContext(ctx, binary, "start")
-	cmd.Env = env
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, &output
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	err := cmd.Run()
-	if err == nil {
-		return nil
-	}
-	if len(output.data) == 0 {
-		fmt.Fprintf(&output, "Could not start kuri: %v\n", err)
-	}
-	if logErr := writeStartupLog(output.data); logErr != nil {
-		return errors.Join(err, fmt.Errorf("write startup log: %w", logErr))
-	}
-	return err
-}
 
 type startupOutput struct {
 	data []byte
@@ -75,7 +43,7 @@ func writeStartupLog(output []byte) error {
 		return err
 	}
 	defer os.Remove(file.Name())
-	_, err = file.Write(output)
+	_, err = file.Write(output[:min(len(output), startupLogLimit)])
 	if err := errors.Join(err, file.Close()); err != nil {
 		return err
 	}
