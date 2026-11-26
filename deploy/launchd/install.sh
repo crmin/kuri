@@ -7,6 +7,7 @@ label='com.github.crmin.kuri'
 plist="/Library/LaunchDaemons/$label.plist"
 program="$directory/kuri"
 link='/usr/local/bin/kuri'
+pause_file="$directory/.menu-pause"
 bin_directory=${link%/*}
 euid=$(/usr/bin/id -u)
 
@@ -260,6 +261,10 @@ startup_command() {
     trap 'exit 130' HUP INT TERM
     staging=$(/usr/bin/mktemp -d /private/var/tmp/kuri-install.XXXXXX)
     verify_registration
+    if [ "$operation" = --startup-install ]; then
+        read_menu_pause
+        [ -z "$pause_stage" ] || fail 'Run kuri start to resume the paused registration before installing.'
+    fi
     trusted_path "$bin_directory" || fail "Unsafe kuri binary directory: $bin_directory"
     if exists "$link" && [ ! -L "$link" ] && [ ! -f "$link" ]; then
         fail "The kuri installation path is not a file or symbolic link: $link"
@@ -275,6 +280,7 @@ startup_command() {
         fi
         /bin/mv -fh "$plist" "$plist_stage/original.plist"
         change_link remove
+        if exists "$pause_file"; then /bin/rm -f "$pause_file"; fi
         printf 'Uninstalled kuri startup and removed %s.\n' "$link"
         return
     fi
@@ -319,6 +325,104 @@ startup_command() {
     /bin/launchctl bootstrap system "$plist"
     printf 'Installed kuri startup for %s at %s.\n' "$account" "$link"
 }
+
+read_menu_pause() {
+    pause_stage=
+    if ! exists "$pause_file"; then return; fi
+    [ -f "$pause_file" ] && protected_by_root "$pause_file" || fail 'Unsafe kuri pause record.'
+    boot_session=$(/usr/sbin/sysctl -n kern.bootsessionuuid) || fail 'Could not identify the current boot session.'
+    [ -n "$boot_session" ] || fail 'Could not identify the current boot session.'
+    {
+        IFS= read -r saved_boot && IFS= read -r saved_uid && IFS= read -r saved_digest && IFS= read -r saved_stage
+    } < "$pause_file" || fail 'Invalid kuri pause record.'
+    if [ "$saved_boot" != "$boot_session" ]; then return; fi
+    pause_stage=$saved_stage
+}
+
+menu_registration_command() {
+    action=$1
+    account=$3
+    template=$4
+    if ! exists "$plist"; then
+        read_loaded_job
+        [ -z "$loaded_job" ] || fail 'The loaded kuri job has no installed registration.'
+        if [ "$action" = --menu-pause ] && ! exists "$pause_file"; then return; fi
+        fail 'The kuri registration is missing.'
+    fi
+    lock_installation
+    staging=$(/usr/bin/mktemp -d /private/var/tmp/kuri-menu.XXXXXX)
+    record=
+    trap '/bin/rm -rf "$staging"; if [ -n "$record" ]; then /bin/rm -f "$record"; fi' EXIT
+    trap 'exit 130' HUP INT TERM
+    verify_registration
+    [ "$registered" != none ] || fail 'The kuri registration is missing.'
+    read_menu_pause
+    digest=$(/usr/bin/shasum -a 256 < "$plist" | /usr/bin/awk '{print $1}')
+    [ -n "$digest" ] || fail 'Could not identify the kuri registration.'
+    if [ -n "$pause_stage" ]; then
+        [ "$saved_uid" = "$uid" ] && [ "$saved_digest" = "$digest" ] || fail 'The paused kuri registration has changed.'
+        case "$pause_stage" in pausing|paused|resuming) ;; *) fail 'Invalid kuri pause phase.' ;; esac
+    fi
+    if [ "$action" = --menu-pause ] && [ "$pause_stage" = paused ] && [ -z "$loaded_job" ] && ! exists "$activation"; then
+        return
+    fi
+    require_admin
+    boot_session=$(/usr/sbin/sysctl -n kern.bootsessionuuid) || fail 'Could not identify the current boot session.'
+    [ -n "$boot_session" ] || fail 'Could not identify the current boot session.'
+
+    case "$action" in
+        --menu-pause)
+            write_menu_pause pausing
+            if [ -n "$loaded_job" ]; then
+                # Capture a process that reactivated between Stop and bootout.
+                late_pid=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p')
+                /bin/launchctl bootout "system/$label"
+                if [ -n "$late_pid" ]; then printf 'pid=%s\n' "$late_pid"; fi
+            fi
+            read_loaded_job
+            [ -z "$loaded_job" ] || fail 'The kuri LaunchDaemon is still loaded.'
+            clear_activation
+            write_menu_pause paused
+            ;;
+        --menu-resume)
+            [ -n "$pause_stage" ] || fail 'No current kuri pause record.'
+            if [ -n "$loaded_job" ] && [ "$pause_stage" != resuming ]; then
+                fail 'The paused kuri LaunchDaemon was loaded externally. Quit again before starting.'
+            fi
+            write_menu_pause resuming
+            if [ -z "$loaded_job" ]; then
+                clear_activation
+                if ! /bin/launchctl bootstrap system "$plist"; then
+                    read_loaded_job
+                    if [ -n "$loaded_job" ]; then /bin/launchctl bootout "system/$label"; fi
+                    clear_activation
+                    write_menu_pause paused
+                    fail 'Could not resume the paused kuri LaunchDaemon.'
+                fi
+            fi
+            ;;
+        --menu-finish-resume)
+            [ "$pause_stage" = resuming ] && [ -n "$loaded_job" ] || fail 'kuri resume has not completed.'
+            /bin/rm -f "$pause_file"
+            ;;
+    esac
+}
+
+write_menu_pause() {
+    record=$(/usr/bin/mktemp "$directory/.menu-pause.XXXXXX")
+    /bin/chmod 0644 "$record"
+    printf '%s\n' "$boot_session" "$uid" "$digest" "$1" > "$record"
+    /bin/mv -fh "$record" "$pause_file"
+    record=
+}
+
+case "${1:-}" in
+    --menu-pause|--menu-resume|--menu-finish-resume)
+        [ "$#" -eq 4 ] || fail 'Invalid kuri menu registration request.'
+        menu_registration_command "$@"
+        exit 0
+        ;;
+esac
 
 if [ "$#" -eq 4 ] && { [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ]; }; then
     startup_command "$@"
@@ -410,6 +514,8 @@ if [ -f "$plist" ] && [ "$(plist_value ProgramArguments.0 "$plist")" = "$link" ]
 fi
 
 if "$first_run"; then
+    read_menu_pause
+    [ -z "$pause_stage" ] || fail 'Run kuri start to resume the paused registration.'
     if [ -f "$plist" ]; then
         owner=$(/usr/bin/plutil -extract UserName raw -o - "$plist")
         if [ "$owner" != "$account" ]; then

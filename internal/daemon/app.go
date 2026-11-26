@@ -233,6 +233,10 @@ func (app *App) State(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	defer conn.Close()
+	return readState(conn, pid)
+}
+
+func readState(conn *net.UnixConn, pid int) (State, error) {
 	if err := sendRequest(conn, "state"); err != nil {
 		return State{}, err
 	}
@@ -254,6 +258,10 @@ func (app *App) Stop(ctx context.Context) (int, error) {
 	if state.PID == 0 || state.Mode != background {
 		return 0, ErrNoBackground
 	}
+	return app.stopInstance(ctx, state, nil)
+}
+
+func (app *App) stopInstance(ctx context.Context, state State, exited func(context.Context) error) (int, error) {
 	wait, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
 	conn, pid, err := app.connectRuntime(wait)
@@ -267,11 +275,14 @@ func (app *App) Stop(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	defer conn.Close()
-	exited, release, err := subscribeExit(pid)
-	if err != nil {
-		return 0, fmt.Errorf("watch background process %d: %w", pid, err)
+	if exited == nil {
+		var release func()
+		exited, release, err = subscribeExit(pid)
+		if err != nil {
+			return 0, fmt.Errorf("watch background process %d: %w", pid, err)
+		}
+		defer release()
 	}
-	defer release()
 
 	if err := json.NewEncoder(conn).Encode(request{Version: version, Action: "stop", Token: state.Token}); err != nil {
 		return 0, err

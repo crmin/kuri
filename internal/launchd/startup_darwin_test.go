@@ -258,6 +258,60 @@ func TestStartupLinkUpdateWaitsForTheRegistrationLock(t *testing.T) {
 	system.checkLink(t, second)
 }
 
+func TestQuitPauseUsesBootSession(t *testing.T) {
+	s := newStartupTestSystem(t)
+	path := s.executable(t, "app")
+	if err := os.WriteFile(filepath.Join(s.root, "boot"), []byte("first-boot\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := s.run(t, "install", path, true); code != 0 {
+		t.Fatalf("install: %d %s", code, out)
+	}
+	menu := func(action string, elevated bool, want int) {
+		t.Helper()
+		out, code := s.runScript(t, elevated, "--menu-"+action, "", s.account, s.template())
+		if code != want {
+			t.Fatalf("%s: %d %s", action, code, out)
+		}
+	}
+	menu("pause", false, 77)
+	menu("pause", true, 0)
+	if _, err := os.Stat(filepath.Join(s.root, "loaded")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("job remained loaded: %v", err)
+	}
+	if out, code := s.run(t, "install", path, true); code == 0 || !strings.Contains(out, "kuri start") {
+		t.Fatalf("paused install: %d %s", code, out)
+	}
+	menu("resume", true, 0)
+	menu("finish-resume", true, 0)
+	menu("pause", true, 0)
+	if err := os.WriteFile(filepath.Join(s.root, "boot"), []byte("second-boot\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	menu("resume", true, 1)
+	if out, code := s.run(t, "install", path, true); code != 0 {
+		t.Fatalf("stale pause blocks install: %d %s", code, out)
+	}
+	if got := s.changes(t); got != "bootstrap\nbootout\nbootstrap\nbootout\n" {
+		t.Fatalf("unexpected service changes: %q", got)
+	}
+}
+
+func TestCurrentMenuPauseRecord(t *testing.T) {
+	for _, tc := range []struct {
+		boot            string
+		uid             int
+		paused, invalid bool
+	}{
+		{"boot-a", 501, true, false}, {"boot-b", 501, false, false}, {"boot-a", 502, false, true},
+	} {
+		paused, err := currentMenuPause("boot-a\n501\ndigest\npaused\n", tc.boot, tc.uid)
+		if paused != tc.paused || (err != nil) != tc.invalid {
+			t.Fatalf("unexpected record result: %v %v", paused, err)
+		}
+	}
+}
+
 type startupTestSystem struct {
 	root, account, link, plist, script string
 }
@@ -288,7 +342,8 @@ func newStartupTestSystem(t *testing.T) startupTestSystem {
 else
     exec /usr/bin/id "$@"
 fi`,
-		"dscl": `printf 'NFSHomeDirectory: %s/home\n' "$TEST_ROOT"`,
+		"dscl":   `printf 'NFSHomeDirectory: %s/home\n' "$TEST_ROOT"`,
+		"sysctl": `exec /bin/cat "$TEST_ROOT/boot"`,
 		"sudo": `shift 4
 exec "$@"`,
 		"install": `shift 4
@@ -348,6 +403,7 @@ esac`,
 		"/private/var/tmp/kuri-", filepath.Join(root, "tmp", "kuri-"),
 		"/usr/bin/id", filepath.Join(root, "id"),
 		"/usr/bin/dscl", filepath.Join(root, "dscl"),
+		"/usr/sbin/sysctl", filepath.Join(root, "sysctl"),
 		"/usr/bin/sudo", filepath.Join(root, "sudo"),
 		"/usr/bin/install", filepath.Join(root, "install"),
 		"/usr/bin/lockf", filepath.Join(root, "lockf"),

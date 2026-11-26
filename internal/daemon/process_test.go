@@ -75,6 +75,16 @@ func TestStartWaitsForReady(t *testing.T) {
 	}
 }
 
+func TestQuitRequiresExitOfKnownServerWithNoSocket(t *testing.T) {
+	app := testApp(t)
+	if err := app.QuitBackground(t.Context(), os.Getpid(), time.Now()); err == nil {
+		t.Fatal("absence of the socket did not prove the known process exited")
+	}
+	if err := app.QuitBackground(t.Context(), 0, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStopWaitsForProcessExit(t *testing.T) {
 	app := testApp(t)
 	exe, err := os.Executable()
