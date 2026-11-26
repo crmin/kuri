@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/crmin/kuri/internal/cli"
 	"github.com/crmin/kuri/internal/daemon"
 	"github.com/crmin/kuri/internal/launchd"
 )
@@ -17,6 +19,13 @@ func main() {
 }
 
 func run(args []string) int {
+	if len(args) == 1 && args[0] == "help" {
+		if err := cli.WriteHelp(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Could not determine the user home directory:", err)
@@ -45,6 +54,12 @@ func run(args []string) int {
 		if err == nil {
 			fmt.Printf("Stopped kuri (PID %d).\n", pid)
 		}
+	case len(args) == 1 && args[0] == "state":
+		var state daemon.State
+		state, err = app.State(ctx)
+		if err == nil {
+			err = cli.WriteState(os.Stdout, state, time.Now())
+		}
 	case len(args) == 1 && args[0] == "__background":
 		err = app.RunBackground(ctx, os.NewFile(3, "readiness"))
 	case len(args) >= 1 && args[0] == "__launchd" && (len(args) == 1 || (len(args) == 2 && args[1] == "--eager")):
@@ -54,7 +69,7 @@ func run(args []string) int {
 			err = app.RunActivated(ctx, sockets, len(args) == 2)
 		}
 	default:
-		err = errors.New("Unknown kuri command.")
+		err = errors.New("Unknown kuri command. Run kuri help to see the available commands.")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
