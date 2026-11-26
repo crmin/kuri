@@ -21,14 +21,16 @@ import (
 	"unsafe"
 
 	"github.com/crmin/kuri/internal/menuview"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 func init() { runtime.LockOSThread() }
 
 const (
-	startAction = 1
-	stopAction  = 2
-	quitAction  = 3
+	startAction     = 1
+	stopAction      = 2
+	quitAction      = 3
+	autoStartAction = 4
 )
 
 type menuPresentation struct {
@@ -70,7 +72,8 @@ func main() {
 		_ = writeStartupLog([]byte(err.Error() + "\n"))
 		return
 	}
-	menu = &menuController{runner: newCommandRunner(launcher), render: renderNative, terminate: func() { C.kuriTerminate() },
+	settingsRunner = newCommandRunner(launcher)
+	menu = &menuController{runner: settingsRunner, render: renderNative, terminate: func() { C.kuriTerminate() },
 		logFailure: func(data []byte) { _ = writeStartupLog(data) }}
 	C.kuriRun()
 }
@@ -89,7 +92,7 @@ func renderNative(view menuPresentation) {
 }
 
 //export kuriGoReady
-func kuriGoReady() { menu.act(startAction, true) }
+func kuriGoReady() { menu.act(autoStartAction, true) }
 
 //export kuriGoVisible
 func kuriGoVisible(visible C.int) { menu.setVisible(visible != 0) }
@@ -224,6 +227,8 @@ func (m *menuController) runAction(action int, known menuview.State) {
 	ctx := context.Background()
 	var result commandResult
 	switch action {
+	case autoStartAction:
+		result = m.autoStart(ctx)
 	case startAction:
 		result = m.runner.run(ctx, 220*time.Second, 20*time.Second, "start")
 	case stopAction:
@@ -246,10 +251,11 @@ func (m *menuController) runAction(action int, known menuview.State) {
 	}
 	state, err := m.runner.state(ctx)
 	// Failure to start an already running server is normal when the app is opened.
-	if action == startAction && result.diagnostic == "kuri is already running." && err == nil && state.PID > 0 {
+	starting := action == startAction || action == autoStartAction
+	if starting && result.diagnostic == "kuri is already running." && err == nil && state.PID > 0 {
 		result.err = nil
 	}
-	if action == startAction && result.err != nil && m.logFailure != nil {
+	if starting && result.err != nil && m.logFailure != nil {
 		m.logFailure([]byte(result.diagnostic + "\n"))
 	}
 	m.mu.Lock()
@@ -270,4 +276,21 @@ func (m *menuController) runAction(action int, known menuview.State) {
 		return
 	}
 	m.emitLocked()
+}
+
+func (m *menuController) autoStart(ctx context.Context) commandResult {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return commandResult{err: err, diagnostic: err.Error()}
+	}
+	cfg, err := settings.NewStore(home).Ensure(ctx)
+	if err != nil {
+		return commandResult{err: err, diagnostic: err.Error()}
+	}
+	if !cfg.General.AutoStart {
+		return commandResult{}
+	}
+	return m.runner.run(context.WithoutCancel(ctx), 220*time.Second, 20*time.Second, "__auto_start")
 }

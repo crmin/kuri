@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/crmin/kuri/internal/credential"
 	"github.com/crmin/kuri/internal/route"
+	"github.com/crmin/kuri/internal/settings"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -52,11 +54,24 @@ func LoadKubernetes(filename string) (*Kubernetes, route.Contexts, error) {
 	if err != nil {
 		return nil, route.Contexts{}, fmt.Errorf("load kubeconfig: %w", err)
 	}
-	names := make([]string, 0, len(config.Contexts))
-	for name := range config.Contexts {
+	k := &Kubernetes{config: config, loader: loader}
+	return k, k.Routes(settings.Defaults("").Server, nil), nil
+}
+
+func (k *Kubernetes) ContextNames() []string {
+	names := make([]string, 0, len(k.config.Contexts))
+	for name := range k.config.Contexts {
 		names = append(names, name)
 	}
-	return &Kubernetes{config: config, loader: loader}, route.NewContexts(config.CurrentContext, names), nil
+	slices.Sort(names)
+	return names
+}
+
+func (k *Kubernetes) Routes(server settings.Server, excluded []string) route.Contexts {
+	names := slices.DeleteFunc(k.ContextNames(), func(name string) bool {
+		return slices.Contains(excluded, name)
+	})
+	return route.NewConfiguredContexts(k.config.CurrentContext, names, server)
 }
 
 // StartCredentials is called before serving requests. Non-exec kubeconfigs

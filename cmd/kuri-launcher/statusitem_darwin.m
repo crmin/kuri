@@ -3,6 +3,7 @@
 #import <AppKit/AppKit.h>
 #import "statusitem_darwin.h"
 #import "popover_darwin.h"
+#import "settings_darwin.h"
 
 extern void kuriGoReady(void);
 extern void kuriGoVisible(int visible);
@@ -12,6 +13,7 @@ extern void kuriGoAction(int action);
 @property(nonatomic, retain) NSStatusItem *item;
 @property(nonatomic, retain) NSMenu *rightMenu;
 @property(nonatomic, retain) KuriPopover *popover;
+@property(nonatomic, retain) KuriSettings *settings;
 @property(nonatomic, retain) NSMenuItem *serverItem;
 @property(nonatomic, retain) NSMenuItem *errorItem;
 @property(nonatomic, retain) NSDictionary *view;
@@ -49,6 +51,10 @@ static KuriStatus *application;
     self.errorItem.hidden = YES;
     [self.rightMenu addItem:self.errorItem];
     [self.rightMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *settings = [[[NSMenuItem alloc] initWithTitle:@"Settings..." action:@selector(openSettings:) keyEquivalent:@","] autorelease];
+    settings.target = self;
+    settings.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+    [self.rightMenu addItem:settings];
     NSMenuItem *quit = [[[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(quit:) keyEquivalent:@"q"] autorelease];
     quit.target = self;
     quit.keyEquivalentModifierMask = NSEventModifierFlagCommand;
@@ -89,14 +95,38 @@ static KuriStatus *application;
     kuriGoAction([self.view[@"mode"] isEqualToString:@"stopped"] ? 1 : 2);
 }
 
-- (void)quit:(id)sender { kuriGoAction(3); }
+- (void)openSettings:(id)sender { kuriOpenSettings(); }
+- (void)quit:(id)sender { kuriRequestQuit(); }
 - (void)menuWillOpen:(NSMenu *)menu { kuriGoVisible(1); }
 - (void)menuDidClose:(NSMenu *)menu { kuriGoVisible(0); }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
-    kuriGoAction(3);
+    kuriRequestQuit();
     return NSTerminateCancel;
 }
 @end
+
+void kuriOpenSettings(void) {
+    [application.popover close];
+    if (!application.settings) application.settings = [[[KuriSettings alloc] init] autorelease];
+    [application.settings open];
+}
+
+void kuriRequestQuit(void) {
+    if (application.settings) [application.settings requestQuit];
+    else kuriGoAction(3);
+}
+
+void kuriRenderSettings(const char *json) {
+    @autoreleasepool {
+        NSString *text = [[NSString alloc] initWithUTF8String:json];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSDictionary *view = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding]
+                options:0 error:NULL];
+            if ([view isKindOfClass:[NSDictionary class]]) [application.settings applyResponse:view];
+        });
+        [text release];
+    }
+}
 
 void kuriRun(void) {
     @autoreleasepool {

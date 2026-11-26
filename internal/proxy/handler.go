@@ -20,7 +20,7 @@ import (
 var ErrShutdown = errors.New("server shutdown interrupted the request")
 
 type connector interface {
-	Acquire(context.Context, route.Request) (*forward.Lease, error)
+	AcquireRequest(context.Context, route.Request) (*forward.Lease, func(), error)
 }
 
 type eventWriter interface {
@@ -59,12 +59,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	event.Domain = target.Host
-	lease, err := h.forwards.Acquire(r.Context(), target)
+	lease, release, err := h.forwards.AcquireRequest(r.Context(), target)
 	if err != nil {
 		event.Reason = limit(err.Error())
 		http.Error(w, "Could not connect to the Kubernetes service.", http.StatusBadGateway)
 		return
 	}
+	defer release()
 
 	upstream := &url.URL{Scheme: "http", Host: lease.Address()}
 	reverse := httputil.ReverseProxy{

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/menuview"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 func TestLauncherRunsBundledStart(t *testing.T) {
@@ -36,6 +37,40 @@ exit 23
 	want := strings.Join([]string{"1", "start", "unset", dir + ":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", ""}, "\n")
 	if string(result.stdout) != want {
 		t.Fatalf("invocation = %q, want %q", result.stdout, want)
+	}
+}
+
+func TestLauncherSkipsAutoStartButAllowsManualStart(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	store := settings.NewStore(home)
+	if _, _, err := store.Update(t.Context(), func(cfg *settings.Config) error {
+		cfg.General.AutoStart = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &menuFixture{calls: make(chan []string, 4), resume: make(chan struct{}),
+		stateValue: menuview.State{Mode: "stopped"}}
+	close(runner.resume)
+	views := make(chan menuPresentation, 8)
+	controller := &menuController{runner: runner, render: func(view menuPresentation) { views <- view }}
+	controller.act(autoStartAction, true)
+	waitForMenu(t, views, func(view menuPresentation) bool { return !view.Busy && view.Known })
+	select {
+	case args := <-runner.calls:
+		t.Fatalf("automatic start executed %q", args)
+	default:
+	}
+	controller.act(startAction, false)
+	waitForMenu(t, views, func(view menuPresentation) bool { return !view.Busy && view.Known })
+	select {
+	case args := <-runner.calls:
+		if len(args) != 1 || args[0] != "start" {
+			t.Fatal(args)
+		}
+	default:
+		t.Fatal("manual start not invoked")
 	}
 }
 

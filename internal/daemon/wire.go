@@ -13,6 +13,7 @@ import (
 
 	"github.com/crmin/kuri/internal/forward"
 	"github.com/crmin/kuri/internal/menuview"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 const (
@@ -26,33 +27,48 @@ const (
 var (
 	ErrNoBackground          = errors.New("No background kuri process is running.")
 	ErrAlreadyRunning        = errors.New("kuri is already running.")
+	ErrAutoStartDisabled     = errors.New("Automatic proxy startup is disabled.")
+	ErrSettingsChanged       = errors.New("Settings changed before the reverse proxy could apply them.")
+	ErrPortRestartRequired   = errors.New("Changing this listener requires restarting the reverse proxy.")
+	ErrPortOccupied          = errors.New("port is already in use by another process")
 	ErrIncompatible          = errors.New("Incompatible kuri control protocol. Update the installed kuri binary.")
 	errNoServer              = errors.New("kuri is not running")
-	errBindPermission        = errors.New("permission denied on loopback port 80")
+	errBindPermission        = errors.New("permission denied")
 	errActivationUnavailable = errors.New("kuri LaunchDaemon activation socket is unavailable")
 )
 
 type State struct {
-	PID     int           `json:"pid"`
-	Mode    string        `json:"mode"`
-	Started time.Time     `json:"started"`
-	Rows    []forward.Row `json:"services"`
-	Token   string        `json:"token,omitempty"`
+	PID              int              `json:"pid"`
+	Mode             string           `json:"mode"`
+	Started          time.Time        `json:"started"`
+	Rows             []forward.Row    `json:"services"`
+	Token            string           `json:"token,omitempty"`
+	Port             int              `json:"port,omitempty"`
+	ProxyFingerprint string           `json:"proxy_fingerprint,omitempty"`
+	Activated        bool             `json:"activated,omitempty"`
+	ForegroundOwner  int              `json:"foreground_owner,omitempty"`
+	AppliedSettings  *settings.Config `json:"applied_settings,omitempty"`
 }
 
 type request struct {
-	Version int    `json:"version"`
-	Action  string `json:"action"`
-	Token   string `json:"token,omitempty"`
-	Menu    bool   `json:"menu,omitempty"`
+	Version           int    `json:"version"`
+	Action            string `json:"action"`
+	Token             string `json:"token,omitempty"`
+	Menu              bool   `json:"menu,omitempty"`
+	Automatic         bool   `json:"automatic,omitempty"`
+	History           bool   `json:"history,omitempty"`
+	Fingerprint       string `json:"fingerprint,omitempty"`
+	ForegroundHandoff bool   `json:"foreground_handoff,omitempty"`
+	PortChange        string `json:"port_change,omitempty"`
 }
 
 type reply struct {
-	Version int             `json:"version"`
-	State   State           `json:"state"`
-	Code    string          `json:"code,omitempty"`
-	Error   string          `json:"error,omitempty"`
-	Menu    *menuview.State `json:"menu,omitempty"`
+	Version    int             `json:"version"`
+	State      State           `json:"state"`
+	Code       string          `json:"code,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	Menu       *menuview.State `json:"menu,omitempty"`
+	PortChange string          `json:"port_change,omitempty"`
 }
 
 func writeReply(out io.Writer, value reply) error {
@@ -68,6 +84,14 @@ func failure(err error) reply {
 		return reply{Code: "not_running", Error: err.Error()}
 	case errors.Is(err, ErrAlreadyRunning):
 		return reply{Code: "already_running", Error: err.Error()}
+	case errors.Is(err, ErrAutoStartDisabled):
+		return reply{Code: "auto_start_disabled", Error: err.Error()}
+	case errors.Is(err, ErrSettingsChanged):
+		return reply{Code: "settings_changed", Error: err.Error()}
+	case errors.Is(err, ErrPortRestartRequired):
+		return reply{Code: "restart_required", Error: err.Error()}
+	case errors.Is(err, ErrPortOccupied):
+		return reply{Code: "port_occupied", Error: err.Error()}
 	case errors.Is(err, ErrIncompatible):
 		return reply{Code: "incompatible", Error: err.Error()}
 	case errors.Is(err, errBindPermission):
@@ -98,6 +122,14 @@ func decodeControlReply(decoder *json.Decoder) (reply, error) {
 		return reply{}, ErrNoBackground
 	case "already_running":
 		return reply{}, ErrAlreadyRunning
+	case "auto_start_disabled":
+		return reply{}, ErrAutoStartDisabled
+	case "settings_changed":
+		return reply{}, ErrSettingsChanged
+	case "restart_required":
+		return reply{}, ErrPortRestartRequired
+	case "port_occupied":
+		return reply{}, ErrPortOccupied
 	case "incompatible":
 		return reply{}, ErrIncompatible
 	case "bind_permission":

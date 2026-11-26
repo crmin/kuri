@@ -3,6 +3,7 @@ package route
 import (
 	"testing"
 
+	"github.com/crmin/kuri/internal/settings"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -20,7 +21,7 @@ func TestForwardHostMatchesExplicitContext(t *testing.T) {
 	if _, err := ambiguous.Parse("api.ns.kuri.localhost"); err != nil {
 		t.Fatal(err)
 	}
-	if got := ambiguous.ForwardHost(target, true); got != "" {
+	if got := ambiguous.ForwardHost(target, true); got != "api.ns.kuri.localhost" {
 		t.Fatal(got)
 	}
 }
@@ -36,7 +37,7 @@ func TestHostForms(t *testing.T) {
 		{"api.default.kuri.localhost", "dev", "api", "default", "api.default.kuri.localhost", 0},
 		{"api.default.unknown.kuri.localhost", "", "", "", "", 0},
 		{"api.bad_ns.kuri.localhost", "", "", "", "", 0},
-		{"api.default.kuri.localhost:81", "", "", "", "", 0},
+		{"api.default.kuri.localhost:81", "dev", "api", "default", "api.default.kuri.localhost", 0},
 		{"http://api.default.kuri.localhost", "", "", "", "", 0},
 		{"+8.api.default.dev.kuri.localhost", "", "", "", "", 0},
 		{"65536.api.default.dev.kuri.localhost", "", "", "", "", 0},
@@ -59,6 +60,29 @@ func TestHostForms(t *testing.T) {
 	}
 	if _, err := NewContexts("", []string{"dev"}).Parse("api.default.kuri.localhost"); err == nil {
 		t.Fatal("accepted current-context routing without current-context")
+	}
+}
+
+func TestConfiguredDomainStylesAndCopyURL(t *testing.T) {
+	server := settings.Server{Domain: "example.com", Port: 8081,
+		Styles: settings.DomainStyles{CurrentContext: true}}
+	target := Target{Context: "dev", Namespace: "default", Service: "api", Port: 80}
+	contexts := NewConfiguredContexts("dev", []string{"dev"}, server)
+	if got := contexts.ForwardHost(target, true); got != "api.default.example.com:8081" {
+		t.Fatalf("copy address %q", got)
+	}
+	for _, host := range []string{"api.default.dev.example.com", "80.api.default.dev.example.com", "api.default.kuri.localhost"} {
+		if _, err := contexts.Parse(host); err == nil {
+			t.Fatalf("accepted disabled host %q", host)
+		}
+	}
+	if _, err := NewConfiguredContexts("dev", []string{"prod"}, server).Parse("api.default.example.com"); err == nil {
+		t.Fatal("implicit host reached an excluded current context")
+	}
+	server.Styles = settings.DomainStyles{ExplicitPort: true}
+	contexts = NewConfiguredContexts("dev", []string{"dev"}, server)
+	if got := contexts.ForwardHost(target, true); got != "80.api.default.dev.example.com:8081" {
+		t.Fatalf("copy fallback %q", got)
 	}
 }
 

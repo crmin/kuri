@@ -179,7 +179,7 @@ func TestForegroundActivationMirrorsOnlyLogLines(t *testing.T) {
 		_, err = conn.Write(frames.Bytes())
 		serve <- err
 	}()
-	if _, err := app.activate(t.Context(), foreground); err != nil {
+	if _, err := app.activate(t.Context(), foreground, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-serve; err != nil {

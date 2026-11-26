@@ -1,6 +1,7 @@
 //go:build cgo
 
 #import "popover_darwin.h"
+#import "settings_darwin.h"
 
 extern void kuriGoVisible(int visible);
 extern void kuriGoAction(int action);
@@ -28,6 +29,8 @@ static NSColor *primaryColor(NSView *view) {
 @property(nonatomic) BOOL tracksHover;
 @property(nonatomic) BOOL hovered;
 @property(nonatomic, retain) NSTrackingArea *rowTrackingArea;
+@property(nonatomic) SEL hoverAction;
+@property(nonatomic) SEL leaveAction;
 - (void)setRowTitle:(NSString *)title;
 @end
 
@@ -56,7 +59,7 @@ static NSColor *primaryColor(NSView *view) {
     [super updateTrackingAreas];
     if (self.tracksHover && !self.rowTrackingArea) {
         self.rowTrackingArea = [[[NSTrackingArea alloc] initWithRect:NSZeroRect
-            options:NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
+            options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
             owner:self userInfo:nil] autorelease];
         [self addTrackingArea:self.rowTrackingArea];
     }
@@ -64,11 +67,14 @@ static NSColor *primaryColor(NSView *view) {
 - (void)mouseEntered:(NSEvent *)event {
     self.hovered = YES;
     [self setRowTitle:self.title];
+    if (self.hoverAction && self.enabled) [NSApp sendAction:self.hoverAction to:self.target from:self];
 }
 - (void)mouseExited:(NSEvent *)event {
     self.hovered = NO;
     [self setRowTitle:self.title];
+    if (self.leaveAction) [NSApp sendAction:self.leaveAction to:self.target from:self];
 }
+- (BOOL)acceptsFirstResponder { return self.enabled; }
 - (void)viewDidChangeEffectiveAppearance {
     [super viewDidChangeEffectiveAppearance];
     if (self.font) [self setRowTitle:self.title];
@@ -85,18 +91,29 @@ static NSColor *primaryColor(NSView *view) {
 @property(nonatomic, retain) NSSwitch *serverSwitch;
 @property(nonatomic, retain) NSTextField *uptime;
 @property(nonatomic, retain) NSTextField *count;
-@property(nonatomic, retain) NSTextField *unavailable;
 @property(nonatomic, retain) NSTextField *problem;
+@property(nonatomic, retain) KuriPopoverButton *settingsButton;
+@property(nonatomic, retain) NSTextField *settingsShortcut;
+@property(nonatomic, retain) KuriPopoverButton *recentButton;
+@property(nonatomic, retain) NSTextField *recentArrow;
 @property(nonatomic, retain) KuriPopoverButton *quitButton;
 @property(nonatomic, retain) NSTextField *shortcut;
 @property(nonatomic, retain) NSBox *headerLine;
 @property(nonatomic, retain) NSBox *rowsLine;
 @property(nonatomic, retain) NSBox *quitLine;
 @property(nonatomic, retain) NSArray *rows;
-@property(nonatomic, retain) NSMutableDictionary *rowButtons;
+@property(nonatomic, retain) NSMutableDictionary<NSString *, KuriPopoverButton *> *rowButtons;
 @property(nonatomic, retain) NSMutableDictionary *feedback;
 @property(nonatomic, retain) NSString *instance;
 @property(nonatomic, retain) id keyMonitor;
+@property(nonatomic, retain) id outsideMonitor;
+@property(nonatomic, retain) id resignObserver;
+@property(nonatomic, assign) NSStatusBarButton *anchor;
+@property(nonatomic, retain) NSPanel *recentPanel;
+@property(nonatomic, retain) NSTextField *emptyRecent;
+@property(nonatomic) NSInteger recentFocus;
+@property(nonatomic) BOOL recentAvailable;
+@property(nonatomic) BOOL recentEnabled;
 @end
 
 static const CGFloat width = 346;
@@ -153,20 +170,33 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
     self.uptime = label(@"", regular, secondary);
     self.count = label(@"", regular, secondary);
     self.rowsLine = line();
-    self.unavailable = label(@"Recent activity unavailable", regular, secondary);
     self.problem = label(@"", [NSFont systemFontOfSize:12], [NSColor systemRedColor]);
     self.quitLine = line();
+    self.recentButton = rowButton(@"Recent Services", self, @selector(toggleRecent:), YES);
+    self.recentButton.hoverAction = @selector(showRecent:);
+    self.recentButton.leaveAction = @selector(scheduleRecentClose:);
+    self.recentArrow = [KuriShortcutLabel labelWithString:@"\u203a"];
+    self.recentArrow.font = [NSFont systemFontOfSize:18];
+    self.recentArrow.textColor = secondary;
+    self.recentArrow.alignment = NSTextAlignmentRight;
+    self.settingsButton = rowButton(@"Settings...", self, @selector(openSettings:), YES);
+    self.settingsShortcut = [KuriShortcutLabel labelWithString:@"\u2318 ,"];
+    self.settingsShortcut.font = regular;
+    self.settingsShortcut.textColor = secondary;
+    self.settingsShortcut.alignment = NSTextAlignmentRight;
     self.quitButton = rowButton(@"Quit", self, @selector(quit:), YES);
     self.shortcut = [KuriShortcutLabel labelWithString:@"\u2318 Q"];
     self.shortcut.font = regular;
     self.shortcut.textColor = secondary;
     self.shortcut.alignment = NSTextAlignmentRight;
     for (NSView *view in @[self.headerLine, self.uptime, self.count, self.rowsLine,
-                           self.unavailable, self.problem, self.quitLine, self.quitButton, self.shortcut]) {
+                           self.recentButton, self.recentArrow, self.problem, self.quitLine,
+                           self.settingsButton, self.settingsShortcut, self.quitButton, self.shortcut]) {
         [self.view addSubview:view];
     }
     self.rowButtons = [NSMutableDictionary dictionary];
     self.feedback = [NSMutableDictionary dictionary];
+    self.recentFocus = -1;
 }
 
 - (void)toggleAt:(NSStatusBarButton *)button {
@@ -176,15 +206,19 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
     }
     if (!self.popover) {
         self.popover = [[[NSPopover alloc] init] autorelease];
-        self.popover.behavior = NSPopoverBehaviorTransient;
+        self.popover.behavior = NSPopoverBehaviorApplicationDefined;
         self.popover.contentViewController = self;
         self.popover.delegate = self;
         self.popover.contentSize = self.view.frame.size;
     }
+    self.anchor = button;
     [self.popover showRelativeToRect:button.bounds ofView:button preferredEdge:NSMinYEdge];
 }
 
-- (void)close { [self.popover close]; }
+- (void)close {
+    [self closeRecent];
+    [self.popover close];
+}
 
 - (void)popoverDidShow:(NSNotification *)notification {
     if (@available(macOS 14.0, *)) {
@@ -193,24 +227,33 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
         [NSApp activateIgnoringOtherApps:YES];
     }
     [self.view.window makeKeyWindow];
-    self.keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
-        NSEventModifierFlags keys = NSEventModifierFlagCommand | NSEventModifierFlagShift |
-            NSEventModifierFlagOption | NSEventModifierFlagControl;
-        if (self.popover.isShown && event.window == self.view.window &&
-            (event.modifierFlags & keys) == NSEventModifierFlagCommand &&
-            [[event.charactersIgnoringModifiers lowercaseString] isEqualToString:@"q"]) {
-            [self quit:nil];
-            return nil;
-        }
+    self.keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown |
+        NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent *(NSEvent *event) {
+        if (event.type == NSEventTypeKeyDown) return [self handleKey:event];
+        if (event.window != self.view.window && event.window != self.recentPanel && event.window != self.anchor.window)
+            [self close];
         return event;
     }];
+    self.outsideMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown |
+        NSEventMaskRightMouseDown handler:^(NSEvent *event) { [self close]; }];
+    self.resignObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidResignActiveNotification
+        object:NSApp queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) { [self close]; }];
     kuriGoVisible(1);
 }
 
 - (void)popoverDidClose:(NSNotification *)notification {
+    [self closeRecent];
     if (self.keyMonitor) {
         [NSEvent removeMonitor:self.keyMonitor];
         self.keyMonitor = nil;
+    }
+    if (self.outsideMonitor) {
+        [NSEvent removeMonitor:self.outsideMonitor];
+        self.outsideMonitor = nil;
+    }
+    if (self.resignObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.resignObserver];
+        self.resignObserver = nil;
     }
     [self.feedback removeAllObjects];
     self.quitButton.hovered = NO;
@@ -258,23 +301,19 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
 
     id rows = view[@"rows"];
     NSArray *next = [rows isKindOfClass:[NSArray class]] ? rows : @[];
+    self.recentAvailable = known && [view[@"recent_available"] boolValue];
+    self.recentEnabled = known && !quitting;
+    self.recentButton.enabled = self.recentEnabled;
     if (![self.rows isEqualToArray:next]) [self rebuildRows:next];
-    self.unavailable.hidden = !known || connected == 0 || [view[@"recent_available"] boolValue];
-    self.rowsLine.hidden = next.count == 0 && self.unavailable.hidden;
-    if (!self.rowsLine.hidden) {
-        self.rowsLine.frame = NSMakeRect(padding, y, width - 2 * padding, 1);
-        y += 5;
-    }
-    if (!self.unavailable.hidden) {
-        self.unavailable.frame = NSMakeRect(padding, y, width - 2 * padding, 20);
-        y += 23;
-    }
+    self.rowsLine.frame = NSMakeRect(padding, y, width - 2 * padding, 1);
+    y += 5;
+    self.recentButton.frame = NSMakeRect(padding, y, width - 2 * padding, 24);
+    self.recentArrow.frame = NSMakeRect(width - 36, y - 2, 15, 24);
+    y += 27;
     for (NSDictionary *row in self.rows) {
         KuriPopoverButton *button = self.rowButtons[row[@"id"]];
-        button.frame = NSMakeRect(padding, y, width - 2 * padding, 24);
-        button.enabled = known && !quitting && [row[@"url"] length] != 0;
+        button.enabled = self.recentEnabled && [row[@"url"] length] != 0;
         [button setRowTitle:self.feedback[row[@"id"]] ? @"Copied" : row[@"label"]];
-        y += 24;
     }
 
     NSString *problem = view[@"error"];
@@ -290,27 +329,183 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
         y += 23;
     }
     self.quitLine.frame = NSMakeRect(padding, y, width - 2 * padding, 1);
-    self.quitButton.frame = NSMakeRect(padding, y + 4, width - 2 * padding, 24);
-    self.shortcut.frame = NSMakeRect(width - 60, y + 8, 47, 18);
-    NSSize size = NSMakeSize(width, y + 34);
+    self.settingsButton.frame = NSMakeRect(padding, y + 4, width - 2 * padding, 24);
+    self.settingsShortcut.frame = NSMakeRect(width - 60, y + 8, 47, 18);
+    self.quitButton.frame = NSMakeRect(padding, y + 28, width - 2 * padding, 24);
+    self.shortcut.frame = NSMakeRect(width - 60, y + 32, 47, 18);
+    NSSize size = NSMakeSize(width, y + 58);
     [self.view setFrameSize:size];
     if (!NSEqualSizes(self.popover.contentSize, size)) self.popover.contentSize = size;
+    if (self.recentPanel.isVisible) {
+        if (!self.recentEnabled) [self closeRecent];
+        else [self layoutRecent];
+    }
 }
 
 - (void)rebuildRows:(NSArray *)rows {
     for (NSButton *button in self.rowButtons.allValues) [button removeFromSuperview];
     [self.rowButtons removeAllObjects];
     self.rows = rows;
-    for (NSDictionary *row in rows) {
+    self.recentFocus = -1;
+    if (!self.recentPanel) return;
+    [self addRecentRows];
+}
+
+- (void)addRecentRows {
+    for (NSDictionary *row in self.rows) {
         KuriPopoverButton *button = rowButton(row[@"label"], self, @selector(copyForward:), YES);
         button.identifier = row[@"id"];
         button.toolTip = [row[@"url"] length] ? row[@"url"] : @"No verified URL for this port forward.";
-        [self.view addSubview:button];
+        button.leaveAction = @selector(scheduleRecentClose:);
+        button.enabled = self.recentEnabled && [row[@"url"] length] != 0;
+        [self.recentPanel.contentView addSubview:button];
         self.rowButtons[button.identifier] = button;
     }
     for (NSString *key in self.feedback.allKeys) {
         if (!self.rowButtons[key]) [self.feedback removeObjectForKey:key];
     }
+}
+
+- (void)toggleRecent:(id)sender {
+    if (!self.recentPanel.isVisible) [self showRecent:sender];
+}
+
+- (void)showRecent:(id)sender {
+    if (!self.popover.isShown || !self.recentEnabled) return;
+    if (!self.recentPanel) {
+        self.recentPanel = [[[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 280, 40)
+            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+            backing:NSBackingStoreBuffered defer:NO] autorelease];
+        self.recentPanel.releasedWhenClosed = NO;
+        self.recentPanel.hasShadow = YES;
+        self.recentPanel.backgroundColor = NSColor.windowBackgroundColor;
+        self.recentPanel.contentView = [[[KuriPopoverCanvas alloc] initWithFrame:NSMakeRect(0, 0, 280, 40)] autorelease];
+        self.emptyRecent = label(@"", [NSFont systemFontOfSize:13], NSColor.secondaryLabelColor);
+        [self.recentPanel.contentView addSubview:self.emptyRecent];
+        NSTrackingArea *tracking = [[[NSTrackingArea alloc] initWithRect:NSZeroRect
+            options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+            owner:self userInfo:nil] autorelease];
+        [self.recentPanel.contentView addTrackingArea:tracking];
+        [self addRecentRows];
+    }
+    [self layoutRecent];
+    if (!self.recentPanel.isVisible) {
+        [self.view.window addChildWindow:self.recentPanel ordered:NSWindowAbove];
+        [self.recentPanel orderFront:nil];
+    }
+    self.recentButton.hovered = YES;
+    [self.recentButton setRowTitle:@"Recent Services"];
+    [self.recentButton setAccessibilityExpanded:YES];
+}
+
+- (NSRect)recentAnchorRect {
+    NSRect frame = [self.recentButton convertRect:self.recentButton.bounds toView:nil];
+    return [self.view.window convertRectToScreen:frame];
+}
+
+- (void)layoutRecent {
+    NSRect parent = self.view.window.frame;
+    NSRect anchor = [self recentAnchorRect];
+    NSScreen *screen = self.view.window.screen ?: NSScreen.mainScreen;
+    if (!screen) return;
+    NSRect usable = screen.visibleFrame;
+    CGFloat paneWidth = MIN(310, NSWidth(usable));
+    CGFloat height = 12 + 24 * MAX(1, self.rows.count);
+    CGFloat x = NSMaxX(parent) + 3;
+    if (x + paneWidth > NSMaxX(usable)) x = NSMinX(parent) - paneWidth - 3;
+    x = MAX(NSMinX(usable), MIN(x, NSMaxX(usable) - paneWidth));
+    CGFloat y = MAX(NSMinY(usable), MIN(NSMaxY(anchor) + 6 - height, NSMaxY(usable) - height));
+    [self.recentPanel setFrame:NSMakeRect(x, y, paneWidth, height) display:YES];
+    self.emptyRecent.stringValue = self.recentAvailable ? @"No recent services" : @"Recent activity unavailable";
+    self.emptyRecent.frame = NSMakeRect(10, 8, paneWidth - 20, 20);
+    self.emptyRecent.hidden = self.rows.count != 0;
+    [self.rows enumerateObjectsUsingBlock:^(NSDictionary *row, NSUInteger index, BOOL *stop) {
+        self.rowButtons[row[@"id"]].frame = NSMakeRect(6, 6 + 24 * index, paneWidth - 12, 24);
+    }];
+}
+
+- (void)closeRecent {
+    if (!self.recentPanel.isVisible) return;
+    [self.recentPanel.parentWindow removeChildWindow:self.recentPanel];
+    [self.recentPanel orderOut:nil];
+    self.recentFocus = -1;
+    self.recentButton.hovered = NO;
+    [self.recentButton setRowTitle:@"Recent Services"];
+    [self.recentButton setAccessibilityExpanded:NO];
+}
+
+- (void)mouseExited:(NSEvent *)event { [self scheduleRecentClose:nil]; }
+
+- (void)scheduleRecentClose:(id)sender {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 160 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (!self.recentPanel.isVisible || self.recentFocus >= 0) return;
+        NSPoint pointer = NSEvent.mouseLocation;
+        if (!NSPointInRect(pointer, [self recentAnchorRect]) && !NSPointInRect(pointer, self.recentPanel.frame))
+            [self closeRecent];
+        else {
+            self.recentButton.hovered = YES;
+            [self.recentButton setRowTitle:@"Recent Services"];
+        }
+    });
+}
+
+- (void)moveRecentFocus:(NSInteger)step {
+    NSInteger index = self.recentFocus;
+    if (index < 0 && step < 0) index = (NSInteger)self.rows.count;
+    for (NSInteger next = index + step; next >= 0 && next < (NSInteger)self.rows.count; next += step) {
+        KuriPopoverButton *candidate = self.rowButtons[self.rows[next][@"id"]];
+        if (!candidate.enabled) continue;
+        if (self.recentFocus >= 0) {
+            KuriPopoverButton *previous = self.rowButtons[self.rows[self.recentFocus][@"id"]];
+            previous.hovered = NO;
+            [previous setRowTitle:previous.title];
+        }
+        self.recentFocus = next;
+        candidate.hovered = YES;
+        [candidate setRowTitle:candidate.title];
+        [self.recentPanel makeFirstResponder:candidate];
+        return;
+    }
+}
+
+- (NSEvent *)handleKey:(NSEvent *)event {
+    if (!self.popover.isShown || (event.window != self.view.window && event.window != self.recentPanel)) return event;
+    NSEventModifierFlags keys = NSEventModifierFlagCommand | NSEventModifierFlagShift |
+        NSEventModifierFlagOption | NSEventModifierFlagControl;
+    if ((event.modifierFlags & keys) == NSEventModifierFlagCommand) {
+        NSString *key = event.charactersIgnoringModifiers.lowercaseString;
+        if ([key isEqualToString:@","]) { [self openSettings:nil]; return nil; }
+        if ([key isEqualToString:@"q"]) { [self quit:nil]; return nil; }
+        return event;
+    }
+    if (event.keyCode == 53) {
+        if (self.recentPanel.isVisible) [self closeRecent];
+        else [self close];
+        return nil;
+    }
+    if (self.recentPanel.isVisible || self.view.window.firstResponder == self.recentButton) {
+        if (event.keyCode == 125 || event.keyCode == 126 || (event.keyCode == 124 && !self.recentPanel.isVisible)) {
+            [self showRecent:nil];
+            [self moveRecentFocus:event.keyCode == 126 ? -1 : 1];
+            return nil;
+        }
+        if (event.keyCode == 123 && self.recentPanel.isVisible) {
+            [self closeRecent];
+            [self.view.window makeFirstResponder:self.recentButton];
+            return nil;
+        }
+        if (event.keyCode == 36 || event.keyCode == 76) {
+            if (self.recentFocus >= 0) {
+                KuriPopoverButton *button = self.rowButtons[self.rows[self.recentFocus][@"id"]];
+                if (button.enabled) [self copyForward:button];
+            } else {
+                [self showRecent:nil];
+                [self moveRecentFocus:1];
+            }
+            return nil;
+        }
+    }
+    return event;
 }
 
 - (void)copyForward:(KuriPopoverButton *)sender {
@@ -342,5 +537,6 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
     kuriGoAction(wantsStart ? 1 : 2);
 }
 
-- (void)quit:(id)sender { kuriGoAction(3); }
+- (void)openSettings:(id)sender { kuriOpenSettings(); }
+- (void)quit:(id)sender { kuriRequestQuit(); }
 @end

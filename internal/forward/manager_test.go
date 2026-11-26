@@ -3,6 +3,7 @@ package forward
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"slices"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/route"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 type stubBackend struct {
@@ -178,14 +180,14 @@ func TestWarmExpiry(t *testing.T) {
 		if got := acquire(t, manager, request("api")); got != first {
 			t.Fatal("did not reuse warm tunnel")
 		}
-		time.Sleep(59 * time.Second)
+		time.Sleep(59*time.Minute + 59*time.Second)
 		if len(manager.Snapshot()) != 1 {
 			t.Fatal("warm tunnel expired early")
 		}
 		time.Sleep(time.Second)
 		synctest.Wait()
 		if len(manager.Snapshot()) != 0 {
-			t.Fatal("warm tunnel survived its 60-second deadline")
+			t.Fatal("warm tunnel survived its 60-minute deadline")
 		}
 	})
 }
@@ -215,6 +217,8 @@ func TestProbeReconnectUntilExpiry(t *testing.T) {
 			opens.Add(1)
 			return stubTunnel(), nil
 		}})
+		manager.UpdatePolicy(settings.PortForward{KeepAlive: true, Minutes: 1, Trigger: settings.LastRequest,
+			MinPort: 30000, MaxPort: 30001}, nil)
 		manager.probe = func(context.Context, *Lease) error {
 			if probes.Add(1) == 1 {
 				return errors.New("connection interrupted")
@@ -266,7 +270,8 @@ func TestExhaustedPoolEvictsOldest(t *testing.T) {
 
 func TestEvictedRequestCannotDialReassignedPort(t *testing.T) {
 	manager := testManager(stubBackend{})
-	manager.maxPort = manager.minPort + 1
+	manager.UpdatePolicy(settings.PortForward{KeepAlive: true, Minutes: 60, Trigger: settings.LastRequest,
+		MinPort: 30000, MaxPort: 30000}, nil)
 	defer manager.Close()
 	previous := acquire(t, manager, request("a"))
 	current := acquire(t, manager, request("b"))
@@ -422,4 +427,145 @@ func TestRecoveryDelayUsesRandomJitter(t *testing.T) {
 	if len(delays) == 1 {
 		t.Fatal("recovery attempts used a fixed delay")
 	}
+}
+
+func TestConcurrentEphemeralRequestsWaitForPort(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var resolves atomic.Int64
+		manager := testManager(stubBackend{resolve: func(_ context.Context, target route.Target, _ string) ([]Destination, error) {
+			resolves.Add(1)
+			return []Destination{stubDestination(target, "first")}, nil
+		}})
+		defer manager.Close()
+		manager.UpdatePolicy(settings.PortForward{MinPort: 30000, MaxPort: 30000}, nil)
+		first, release, err := manager.AcquireRequest(t.Context(), request("api"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			second, closeSecond, err := manager.AcquireRequest(t.Context(), request("api"))
+			if err == nil {
+				defer closeSecond()
+				if second == first || second.LocalPort != first.LocalPort {
+					err = errors.New("ephemeral port was reused without opening a new tunnel")
+				}
+			}
+			done <- err
+		}()
+		synctest.Wait()
+		if resolves.Load() != 1 {
+			t.Fatalf("port waiter started Kubernetes resolution: %d calls", resolves.Load())
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("request with no free port did not wait: %v", err)
+		default:
+		}
+		release()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		active, history := manager.RecentHistory()
+		if active != 0 || len(history) != 1 || history[0].Service != "api" {
+			t.Fatalf("active %d, history %+v", active, history)
+		}
+	})
+}
+
+func TestEphemeralPortReservationReleasedOnLookupFailure(t *testing.T) {
+	var calls atomic.Int64
+	manager := testManager(stubBackend{resolve: func(_ context.Context, target route.Target, _ string) ([]Destination, error) {
+		if calls.Add(1) == 1 {
+			return nil, errors.New("fixture lookup failed")
+		}
+		return []Destination{stubDestination(target, "first")}, nil
+	}})
+	defer manager.Close()
+	manager.UpdatePolicy(settings.PortForward{MinPort: 30000, MaxPort: 30000}, nil)
+	if _, _, err := manager.AcquireRequest(t.Context(), request("api")); err == nil {
+		t.Fatal("lookup unexpectedly succeeded")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	lease, release, err := manager.AcquireRequest(ctx, request("api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if lease.LocalPort != 30000 {
+		t.Fatalf("released port was not reused: %d", lease.LocalPort)
+	}
+}
+
+func TestKeepAliveTimerModes(t *testing.T) {
+	for _, trigger := range []string{settings.LastRequest, settings.ForwardOpened} {
+		t.Run(trigger, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				manager := testManager(stubBackend{})
+				defer manager.Close()
+				manager.UpdatePolicy(settings.PortForward{KeepAlive: true, Minutes: 1, Trigger: trigger,
+					MinPort: 30000, MaxPort: 30000}, nil)
+				first := acquire(t, manager, request("api"))
+				time.Sleep(59 * time.Second)
+				if second := acquire(t, manager, request("api")); second != first {
+					t.Fatal("did not reuse the lease")
+				}
+				time.Sleep(time.Second)
+				synctest.Wait()
+				if active := len(manager.Snapshot()) != 0; active != (trigger == settings.LastRequest) {
+					t.Fatalf("active = %t, trigger = %s", active, trigger)
+				}
+			})
+		})
+	}
+}
+
+func TestLiveForwardPolicyRecalculatesActiveLeases(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := testManager(stubBackend{})
+		defer manager.Close()
+		lease, release, err := manager.AcquireRequest(t.Context(), request("api"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Minute)
+		manager.UpdatePolicy(settings.PortForward{KeepAlive: true, Minutes: 1, Trigger: settings.ForwardOpened,
+			MinPort: 30000, MaxPort: 30001}, nil)
+		synctest.Wait()
+		if !lease.isAlive() || len(manager.Snapshot()) != 0 {
+			t.Fatal("expired lease was retained for new requests or closed during the existing request")
+		}
+		release()
+		synctest.Wait()
+		if lease.isAlive() {
+			t.Fatal("retired lease survived after the request finished")
+		}
+	})
+}
+
+func TestRecentHistorySurvivesForwardRemoval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := testManager(stubBackend{})
+		defer manager.Close()
+		manager.UpdatePolicy(settings.PortForward{MinPort: 30000, MaxPort: 30000}, nil)
+		for i := range 12 {
+			_, release, err := manager.AcquireRequest(t.Context(), request(fmt.Sprintf("svc%d", i)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			release()
+			time.Sleep(time.Second)
+		}
+		_, release, err := manager.AcquireRequest(t.Context(), request("svc7"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		active, recent := manager.RecentHistory()
+		if active != 0 || len(recent) != 10 || recent[0].Service != "svc7" || recent[1].Service != "svc11" || recent[9].Service != "svc2" {
+			t.Fatalf("recent history active=%d rows=%+v", active, recent)
+		}
+	})
 }

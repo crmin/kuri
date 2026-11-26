@@ -17,6 +17,7 @@ import (
 	"time"
 
 	launchdassets "github.com/crmin/kuri/deploy/launchd"
+	"github.com/crmin/kuri/internal/settings"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
@@ -40,19 +41,39 @@ func InstallStartup(ctx context.Context, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("find the current directory: %w", err)
 	}
-	return changeStartup(ctx, "install", filepath.Join(directory, "kuri"), stdout, stderr)
+	return InstallStartupAt(ctx, filepath.Join(directory, "kuri"), stdout, stderr)
+}
+
+func InstallStartupAt(ctx context.Context, source string, stdout, stderr io.Writer) error {
+	return changeStartup(ctx, "install", source, stdout, stderr)
 }
 
 func UninstallStartup(ctx context.Context, stdout, stderr io.Writer) error {
 	return changeStartup(ctx, "uninstall", "", stdout, stderr)
 }
 
-func changeStartup(ctx context.Context, operation, source string, stdout, stderr io.Writer) error {
+func RemoveSocketRegistration(ctx context.Context, stderr io.Writer) error {
+	return changeStartup(ctx, "unregister-sockets", "", io.Discard, stderr)
+}
+
+func changeStartup(ctx context.Context, operation, source string, stdout, stderr io.Writer, options ...string) error {
 	account, err := startupAccount()
 	if err != nil {
 		return err
 	}
 	args := []string{"--startup-" + operation, source, account, launchdassets.Plist}
+	if operation == "install" && os.Geteuid() != 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		cfg, err := settings.NewStore(home).Read()
+		if err != nil {
+			return err
+		}
+		args = append(args, strconv.Itoa(cfg.Server.Port))
+	}
+	args = append(args, options...)
 	return runStartupWithApproval(ctx, operation, stdout, stderr, func(admin bool) ([]byte, error) {
 		return installerCommand(ctx, args, admin).CombinedOutput()
 	})
@@ -114,7 +135,7 @@ func installerCommand(ctx context.Context, args []string, admin bool) *exec.Cmd 
 
 // Register installs the current executable for the requesting account. The
 // privileged script creates sockets, which launchd then hands to that user.
-func Register(ctx context.Context, home, activation string) error {
+func Register(ctx context.Context, home, activation string, handoff ...string) error {
 	lock, err := lockRegistration(ctx, home)
 	if err != nil {
 		return err
@@ -123,8 +144,12 @@ func Register(ctx context.Context, home, activation string) error {
 
 	// Another invocation may have completed installation while we waited.
 	if exec.CommandContext(ctx, "/bin/launchctl", "print", serviceTarget).Run() == nil {
+		registration, err := Registered(ctx, home)
+		if err != nil {
+			return err
+		}
 		info, err := os.Lstat(activation)
-		if err == nil && info.Mode()&os.ModeSocket != 0 &&
+		if registration.Present() && err == nil && info.Mode()&os.ModeSocket != 0 &&
 			info.Mode().Perm()&0077 == 0 && int(info.Sys().(*syscall.Stat_t).Uid) == os.Geteuid() {
 			return nil
 		}
@@ -142,9 +167,14 @@ func Register(ctx context.Context, home, activation string) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"--first-run", executable, account.Username, home, launchdassets.Plist}
+	cfg, err := settings.NewStore(home).Read()
+	if err != nil {
+		return err
+	}
+	args := []string{"--first-run", executable, account.Username, home, launchdassets.Plist, strconv.Itoa(cfg.Server.Port)}
+	args = append(args, handoff...)
 	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "kuri needs administrator approval to register its LaunchDaemon for loopback port 80.")
+		fmt.Fprintf(os.Stderr, "kuri needs administrator approval to register its LaunchDaemon for loopback port %d.\n", cfg.Server.Port)
 	}
 	out, err := installerCommand(ctx, args, true).CombinedOutput()
 	if err == nil {

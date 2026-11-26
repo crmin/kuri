@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/crmin/kuri/internal/menuview"
 	"github.com/crmin/kuri/internal/route"
 )
 
@@ -25,19 +26,16 @@ func (m *Manager) RecentSnapshot(limit int) (int, []Row) {
 	now := time.Now()
 	best := make([]*entry, 0, limit)
 	var count int
-	for _, e := range m.entries {
-		if !isActive(e, now) {
-			continue
-		}
+	add := func(e *entry) {
 		count++
 		if e.lastAccess.IsZero() {
-			continue
+			return
 		}
 		at, _ := slices.BinarySearchFunc(best, e, func(a, b *entry) int {
 			return compareRecent(a.lastAccess, a.target, b.lastAccess, b.target)
 		})
 		if at == limit {
-			continue
+			return
 		}
 		if len(best) < limit {
 			best = append(best, nil)
@@ -45,11 +43,51 @@ func (m *Manager) RecentSnapshot(limit int) (int, []Row) {
 		copy(best[at+1:], best[at:])
 		best[at] = e
 	}
+	for _, e := range m.entries {
+		if isActive(e, now) {
+			add(e)
+		}
+	}
+	for e := range m.ephemeral {
+		if e.lease.isAlive() {
+			add(e)
+		}
+	}
 	rows := make([]Row, len(best))
 	for i, e := range best {
 		rows[i] = m.snapshotRow(e)
 	}
 	return count, rows
+}
+
+func (m *Manager) recordLocked(e *entry) {
+	row := m.snapshotRow(e)
+	m.history = slices.DeleteFunc(m.history, func(entry Row) bool { return entry.Target == row.Target })
+	at, _ := slices.BinarySearchFunc(m.history, row, func(a, b Row) int {
+		return compareRecent(*a.LastAccess, a.Target, *b.LastAccess, b.Target)
+	})
+	if at < menuview.RecentLimit {
+		m.history = slices.Insert(m.history, at, row)
+		m.history = m.history[:min(len(m.history), menuview.RecentLimit)]
+	}
+}
+
+func (m *Manager) RecentHistory() (int, []Row) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	now := time.Now()
+	for _, e := range m.entries {
+		if isActive(e, now) {
+			count++
+		}
+	}
+	for e := range m.ephemeral {
+		if e.lease.isAlive() {
+			count++
+		}
+	}
+	return count, slices.Clone(m.history)
 }
 
 // RecentRows selects from an older daemon's complete state reply.
