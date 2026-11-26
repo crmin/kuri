@@ -2,6 +2,8 @@ package menuview
 
 import "time"
 
+const RecentLimit = 5
+
 type State struct {
 	Mode            string     `json:"mode"`
 	PID             int        `json:"pid"`

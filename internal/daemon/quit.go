@@ -27,7 +27,7 @@ func (app *App) QuitBackground(ctx context.Context, knownPID int, knownStarted t
 		return fmt.Errorf("observe shutdown of kuri process %d: %w", pid, err)
 	}
 	defer release()
-	state, err := readState(conn, pid)
+	state, err := readState(query, conn, pid)
 	conn.Close()
 	if err != nil {
 		return err

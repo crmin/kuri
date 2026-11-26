@@ -233,21 +233,32 @@ func (app *App) State(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	defer conn.Close()
-	return readState(conn, pid)
+	return readState(ctx, conn, pid)
 }
 
-func readState(conn *net.UnixConn, pid int) (State, error) {
-	if err := sendRequest(conn, "state"); err != nil {
-		return State{}, err
-	}
-	state, err := decodeReply(json.NewDecoder(conn))
+func readState(ctx context.Context, conn *net.UnixConn, pid int) (State, error) {
+	answer, err := readOnlyState(ctx, conn, false)
 	if err != nil {
 		return State{}, err
 	}
-	if state.PID != pid {
+	if answer.State.PID != pid {
 		return State{}, errors.New("control response PID does not match the running process")
 	}
-	return state, nil
+	return answer.State, nil
+}
+
+func readOnlyState(ctx context.Context, conn *net.UnixConn, menu bool) (reply, error) {
+	interrupt := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer interrupt()
+	err := json.NewEncoder(conn).Encode(request{Version: version, Action: "state", Menu: menu})
+	var answer reply
+	if err == nil {
+		answer, err = decodeControlReply(json.NewDecoder(conn))
+	}
+	if err != nil && ctx.Err() != nil {
+		return reply{}, ctx.Err()
+	}
+	return answer, err
 }
 
 func (app *App) Stop(ctx context.Context) (int, error) {

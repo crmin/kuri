@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
-	"sort"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -484,33 +484,32 @@ func (m *Manager) release(e *entry, lease *Lease) {
 
 func (m *Manager) Snapshot() []Row {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	var rows []Row
 	now := time.Now()
 	for _, e := range m.entries {
-		if e.lease != nil && e.lease.isAlive() && now.Before(e.deadline) {
-			lastAccess := e.lastAccess
-			rows = append(rows, Row{
-				Target: e.target, PortName: e.lease.Destination.PortName, LocalPort: e.lease.LocalPort,
-				Connected: e.lease.Connected, LastAccess: &lastAccess,
-				DefaultPort: m.defaults[defaultTarget(e.target)] == e.target.Port,
-			})
+		if isActive(e, now) {
+			rows = append(rows, m.snapshotRow(e))
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		a, b := rows[i], rows[j]
-		if a.Context != b.Context {
-			return a.Context < b.Context
-		}
-		if a.Namespace != b.Namespace {
-			return a.Namespace < b.Namespace
-		}
-		if a.Service != b.Service {
-			return a.Service < b.Service
-		}
-		return a.Port < b.Port
+	m.mu.Unlock()
+	slices.SortFunc(rows, func(a, b Row) int {
+		return compareTarget(a.Target, b.Target)
 	})
 	return rows
+}
+
+func isActive(e *entry, now time.Time) bool {
+	return e.lease != nil && e.lease.isAlive() && now.Before(e.deadline)
+}
+
+// snapshotRow copies the mutable entry into the caller's snapshot. Hold m.mu.
+func (m *Manager) snapshotRow(e *entry) Row {
+	lastAccess := e.lastAccess
+	return Row{
+		Target: e.target, PortName: e.lease.Destination.PortName, LocalPort: e.lease.LocalPort,
+		Connected: e.lease.Connected, LastAccess: &lastAccess,
+		DefaultPort: m.defaults[defaultTarget(e.target)] == e.target.Port,
+	}
 }
 
 func (m *Manager) Close() {

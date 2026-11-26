@@ -15,6 +15,7 @@ import (
 
 	"github.com/crmin/kuri/internal/accesslog"
 	"github.com/crmin/kuri/internal/forward"
+	"github.com/crmin/kuri/internal/menuview"
 	"github.com/crmin/kuri/internal/proxy"
 	"golang.org/x/sys/unix"
 )
@@ -88,12 +89,17 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 	stopped := &stopResult{done: make(chan struct{})}
 	go func() {
 		defer close(controlDone)
-		serveRuntimeControl(control, state, func() []forward.Row {
-			rows := manager.Snapshot()
+		validateHosts := func(rows []forward.Row) []forward.Row {
 			for i := range rows {
 				rows[i].MenuHost = contexts.ForwardHost(rows[i].Target, rows[i].DefaultPort)
 			}
 			return rows
+		}
+		serveRuntimeControl(control, state, func() []forward.Row {
+			return validateHosts(manager.Snapshot())
+		}, func() (menuview.State, error) {
+			count, rows := manager.RecentSnapshot(menuview.RecentLimit)
+			return makeMenuState(state, count, validateHosts(rows), true)
 		}, stop, stopped)
 	}()
 
@@ -201,7 +207,7 @@ type stopResult struct {
 	err  error
 }
 
-func serveRuntimeControl(listener *net.UnixListener, state State, snapshot func() []forward.Row, stop func(), stopped *stopResult) {
+func serveRuntimeControl(listener *net.UnixListener, state State, snapshot func() []forward.Row, menuSnapshot func() (menuview.State, error), stop func(), stopped *stopResult) {
 	var clients sync.WaitGroup
 	defer clients.Wait()
 	for {
@@ -219,6 +225,15 @@ func serveRuntimeControl(listener *net.UnixListener, state State, snapshot func(
 			}
 			switch req.Action {
 			case "state":
+				if req.Menu {
+					menu, err := menuSnapshot()
+					if err != nil {
+						_ = writeReply(conn, failure(err))
+						return
+					}
+					_ = writeReply(conn, reply{Menu: &menu})
+					return
+				}
 				current := state
 				current.Rows = snapshot()
 				_ = writeReply(conn, reply{State: current})

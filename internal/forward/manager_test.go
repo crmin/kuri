@@ -83,6 +83,26 @@ func TestSnapshotTracksLastRequestAndDefault(t *testing.T) {
 	})
 }
 
+func TestRecentSnapshotReturnsCountAndLatestRoutes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := newManager(stubBackend{}, 30000, 30010, func(int) error { return nil }, func(context.Context, *Lease) error { return nil })
+		defer manager.Close()
+		for _, name := range []string{"g", "f", "e", "d", "c", "b", "a"} {
+			acquire(t, manager, request(name))
+		}
+		count, rows := manager.RecentSnapshot(5)
+		if count != 7 || len(rows) != 5 || rows[0].Service != "a" || rows[4].Service != "e" {
+			t.Fatalf("count %d, rows %+v", count, rows)
+		}
+		time.Sleep(time.Second)
+		acquire(t, manager, request("f"))
+		count, rows = manager.RecentSnapshot(5)
+		if count != 7 || len(rows) != 5 || rows[0].Service != "f" || rows[4].Service != "d" {
+			t.Fatalf("count %d, rows %+v", count, rows)
+		}
+	})
+}
+
 func TestCloseReleasesEveryActiveForward(t *testing.T) {
 	var closed atomic.Int64
 	manager := testManager(stubBackend{open: func(context.Context, Destination, int) (Tunnel, error) {

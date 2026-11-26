@@ -15,6 +15,7 @@ import (
 	"github.com/crmin/kuri/internal/credential"
 	"github.com/crmin/kuri/internal/daemon"
 	"github.com/crmin/kuri/internal/launchd"
+	"github.com/crmin/kuri/internal/menuview"
 )
 
 func main() {
@@ -97,14 +98,10 @@ func run(args []string) int {
 			err = cli.WriteState(os.Stdout, state, time.Now())
 		}
 	case len(args) == 1 && args[0] == "__menu_state":
-		state, stateErr := app.State(ctx)
-		err = stateErr
+		var view menuview.State
+		view, err = app.MenuState(ctx)
 		if err == nil {
-			view, viewErr := makeMenuState(state)
-			err = viewErr
-			if err == nil {
-				err = json.NewEncoder(os.Stdout).Encode(view)
-			}
+			err = json.NewEncoder(os.Stdout).Encode(view)
 		}
 	case len(args) >= 1 && args[0] == "__menu_quit":
 		err = quitMenu(ctx, app, home, args[1:])
