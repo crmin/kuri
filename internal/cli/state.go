@@ -30,7 +30,7 @@ func WriteState(out io.Writer, state daemon.State, now time.Time) error {
 			return err
 		}
 	}
-	_, err := fmt.Fprintln(out, view.View().Content)
+	_, err := fmt.Fprintln(out, view.content)
 	return err
 }
 
@@ -40,7 +40,10 @@ func (stateView) Init() tea.Cmd { return tea.Quit }
 
 func (m stateView) Update(tea.Msg) (tea.Model, tea.Cmd) { return m, nil }
 
-func (m stateView) View() tea.View { return tea.NewView(m.content) }
+func (m stateView) View() tea.View {
+	// Bubble Tea clears its last line on exit. Leave that line empty.
+	return tea.NewView(m.content + "\n")
+}
 
 func serviceTable(state daemon.State, now time.Time) string {
 	titles := []string{"ctx", "namespace", "service", "remote port", "local port", "connected"}
