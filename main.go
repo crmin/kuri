@@ -41,18 +41,31 @@ func run(args []string) int {
 		}
 		return 0
 	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if len(args) == 1 && (args[0] == "install" || args[0] == "uninstall") {
+		operation := launchd.InstallStartup
+		if args[0] == "uninstall" {
+			operation = launchd.UninstallStartup
+		}
+		if err := operation(ctx, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Could not determine the user home directory:", err)
 		return 1
 	}
 	app := daemon.New(home, launchd.ControlPath(os.Geteuid()), os.Stdout, os.Stderr)
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	switch {
 	case len(args) == 0:
 		err = app.RunForeground(ctx)
+	case len(args) == 1 && args[0] == "start" && os.Getenv("KURI_LAUNCHD_START") == "1":
+		err = runActivated(ctx, app, true)
 	case len(args) == 1 && args[0] == "start":
 		var pid int
 		pid, err = app.Start(ctx)
@@ -78,11 +91,7 @@ func run(args []string) int {
 	case len(args) == 1 && args[0] == "__background":
 		err = app.RunBackground(ctx, os.NewFile(3, "readiness"))
 	case len(args) >= 1 && args[0] == "__launchd" && (len(args) == 1 || (len(args) == 2 && args[1] == "--eager")):
-		var sockets launchd.Sockets
-		sockets, err = launchd.Acquire()
-		if err == nil {
-			err = app.RunActivated(ctx, sockets, len(args) == 2)
-		}
+		err = runActivated(ctx, app, len(args) == 2)
 	default:
 		err = errors.New("Unknown kuri command. Run kuri help to see the available commands.")
 	}
@@ -91,4 +100,12 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func runActivated(ctx context.Context, app *daemon.App, eager bool) error {
+	sockets, err := launchd.Acquire()
+	if err != nil {
+		return err
+	}
+	return app.RunActivated(ctx, sockets, eager)
 }

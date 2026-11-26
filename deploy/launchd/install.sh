@@ -1,5 +1,329 @@
 #!/bin/sh
 set -eu
+umask 022
+
+directory='/Library/Application Support/kuri'
+label='com.github.crmin.kuri'
+plist="/Library/LaunchDaemons/$label.plist"
+program="$directory/kuri"
+link='/usr/local/bin/kuri'
+bin_directory=${link%/*}
+euid=$(/usr/bin/id -u)
+
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+exists() { [ -e "$1" ] || [ -L "$1" ]; }
+require_admin() { if [ "$euid" -ne 0 ]; then exit 77; fi; }
+plist_value() { /usr/bin/plutil -extract "$1" raw -o - "$2"; }
+
+protected_by_root() {
+    [ ! -L "$1" ] && [ "$(/usr/bin/stat -f '%u' "$1")" -eq 0 ] &&
+        [ "$(( 0$(/usr/bin/stat -f '%Lp' "$1") & 022 ))" -eq 0 ]
+}
+
+lock_installation() {
+    if ! exists "$directory"; then
+        require_admin
+        /usr/bin/install -o root -g wheel -m 0755 -d "$directory"
+    fi
+    if [ ! -d "$directory" ] || ! protected_by_root "$directory"; then
+        fail 'The kuri installation directory must be writable only by root.'
+    fi
+    install_lock="$directory/.install.lock"
+    if ! exists "$install_lock"; then
+        require_admin
+        (set -C; : > "$install_lock") 2>/dev/null || [ -f "$install_lock" ]
+    fi
+    if [ ! -f "$install_lock" ] || ! protected_by_root "$install_lock"; then
+        fail 'The kuri installation lock must be a root-owned regular file.'
+    fi
+    # Keep the file in place. lockf holds the lock on this shell's descriptor.
+    exec 9<"$install_lock"
+    /usr/bin/lockf -t 15 9 || fail 'Could not lock the kuri installation.'
+}
+
+clear_activation() {
+    # launchd can leave the Unix socket on disk after bootout.
+    if exists "$activation"; then
+        if [ -L "$activation" ] || [ ! -S "$activation" ] ||
+            [ "$(/usr/bin/stat -f '%u' "$activation")" -ne "$uid" ]; then
+            printf '%s\n' 'Unsafe kuri activation socket path.' >&2
+            return 1
+        fi
+        /bin/rm "$activation"
+    fi
+}
+
+configure_plist() {
+    /usr/bin/plutil -replace UserName -string "$account" "$1"
+    /usr/bin/plutil -replace EnvironmentVariables.HOME -string "$home" "$1"
+    /usr/bin/plutil -replace Sockets.Control.SockPathName -string "$activation" "$1"
+    /usr/bin/plutil -replace Sockets.Control.SockPathOwner -integer "$uid" "$1"
+    case "$2" in
+        eager)
+            /usr/bin/plutil -replace RunAtLoad -bool true "$1"
+            /usr/bin/plutil -insert ProgramArguments.2 -string --eager "$1"
+            ;;
+        startup)
+            /usr/bin/plutil -replace RunAtLoad -bool true "$1"
+            /usr/bin/plutil -replace ProgramArguments.0 -string "$link" "$1"
+            /usr/bin/plutil -replace ProgramArguments.1 -string start "$1"
+            /usr/bin/plutil -insert EnvironmentVariables.KURI_LAUNCHD_START -string 1 "$1"
+            ;;
+    esac
+    /usr/bin/plutil -lint -s "$1"
+}
+
+account_home() {
+    account_record=$(/usr/bin/dscl . -read "/Users/$1" NFSHomeDirectory) || return 1
+    printf '%s\n' "${account_record#NFSHomeDirectory: }"
+}
+
+trusted_path() (
+    path_to_check=$1
+    allowed_owner=${2:-$uid}
+    while [ "$path_to_check" != / ]; do
+        case "$path_to_check" in /*) ;; *) return 1 ;; esac
+        if exists "$path_to_check"; then
+            [ ! -L "$path_to_check" ] || return 1
+            owner=$(/usr/bin/stat -f '%u' "$path_to_check") || return 1
+            mode=$(/usr/bin/stat -f '%Lp' "$path_to_check") || return 1
+            { [ "$owner" -eq 0 ] || [ "$owner" -eq "$allowed_owner" ]; } &&
+                [ "$(( 0$mode & 022 ))" -eq 0 ] || return 1
+        fi
+        path_to_check=${path_to_check%/*}
+        path_to_check=${path_to_check:-/}
+    done
+)
+
+verify_loaded_job() {
+    # Compare the loaded definition with the on-disk plist before changing it.
+    loaded_path=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^\tpath = //p')
+    loaded_program=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^\tprogram = //p')
+    loaded_account=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^\tusername = //p')
+    loaded_home=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^\t\tHOME => //p')
+    loaded_marker=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^\t\tKURI_LAUNCHD_START => //p')
+    loaded_args=$(printf '%s\n' "$loaded_job" | /usr/bin/awk '
+        /^\targuments = \{$/ { args = 1; next }
+        /^\t}$/ { args = 0 }
+        args { sub(/^\t\t/, ""); print }
+    ')
+    case "$registered" in
+        startup) expected_program=$link; expected_args=$(printf '%s\n' "$link" start); expected_marker=1 ;;
+        eager) expected_program=$program; expected_args=$(printf '%s\n' "$program" __launchd --eager); expected_marker= ;;
+        legacy) expected_program=$program; expected_args=$(printf '%s\n' "$program" __launchd); expected_marker= ;;
+        *) return 1 ;;
+    esac
+    [ "$loaded_path" = "$plist" ] && [ "$loaded_program" = "$expected_program" ] &&
+        [ "$loaded_args" = "$expected_args" ] && [ "$loaded_marker" = "$expected_marker" ] &&
+        [ "$loaded_account" = "$account" ] && [ "$loaded_home" = "$home" ]
+}
+
+read_loaded_job() {
+    if loaded_job=$(/bin/launchctl print "system/$label" 2>&1); then
+        return 0
+    else
+        launchctl_status=$?
+        # launchctl returns BOOTSTRAP_UNKNOWN_SERVICE for an unloaded label.
+        if [ "$launchctl_status" -eq 113 ]; then
+            loaded_job=
+        else
+            fail "Could not check the kuri LaunchDaemon: $loaded_job"
+        fi
+    fi
+}
+
+verify_registration() {
+    registered=none
+    home=
+    if exists "$plist"; then
+        [ -f "$plist" ] && protected_by_root "$plist" || fail "Unsafe kuri registration: $plist"
+        registered_account=$(plist_value UserName "$plist") || fail 'Could not read the registered kuri account.'
+        if [ -z "$account" ]; then account=$registered_account; fi
+        [ "$registered_account" = "$account" ] || fail 'The kuri LaunchDaemon belongs to another macOS account.'
+        home=$(plist_value EnvironmentVariables.HOME "$plist") || fail 'Could not read the registered kuri home directory.'
+    fi
+    if [ -z "$account" ]; then
+        console_uid=$(/usr/bin/stat -f '%u' /dev/console)
+        [ "$console_uid" -ne 0 ] || fail 'Run kuri from the macOS account that will use it.'
+        account=$(/usr/bin/id -un "$console_uid")
+    fi
+    uid=$(/usr/bin/id -u "$account") || fail 'Could not determine the kuri macOS account.'
+    [ "$uid" -ne 0 ] || fail 'Choose a non-root macOS user for kuri.'
+    if [ -z "$home" ]; then home=$(account_home "$account"); fi
+    case "$home" in /*) ;; *) fail 'The kuri home directory must be an absolute path.' ;; esac
+    if [ ! -d "$home" ] || [ "$(/usr/bin/stat -L -f '%u' "$home")" -ne "$uid" ]; then
+        fail 'The kuri home directory must belong to the selected macOS user.'
+    fi
+    activation="$directory/activate-$uid.sock"
+
+    if exists "$plist"; then
+        case "$(plist_value ProgramArguments.1 "$plist")" in
+            start) registered=startup ;;
+            __launchd)
+                registered=legacy
+                if [ "$(plist_value RunAtLoad "$plist")" = true ]; then registered=eager; fi
+                ;;
+            *) fail 'The existing LaunchDaemon is not a recognized kuri registration.' ;;
+        esac
+        printf '%s\n' "$template" > "$staging/expected.plist"
+        configure_plist "$staging/expected.plist" "$registered"
+        expected=$(/usr/bin/plutil -convert xml1 -o - "$staging/expected.plist")
+        actual=$(/usr/bin/plutil -convert xml1 -o - "$plist")
+        [ "$expected" = "$actual" ] || fail 'The existing LaunchDaemon is not a recognized kuri registration.'
+    fi
+    read_loaded_job
+    if [ -n "$loaded_job" ] && ! verify_loaded_job; then
+        fail 'The loaded kuri LaunchDaemon differs from its registered configuration.'
+    fi
+}
+
+change_link() {
+    # A user-owned directory can be renamed by its owner during this operation.
+    # Run the filesystem changes as that user whenever root does not own the tree.
+    if [ "$euid" -eq 0 ] && ! trusted_path "$bin_directory" 0; then
+        set -- /usr/bin/sudo -n -u "$account" -- /bin/sh -s -- "$1" "$binary" "$link"
+    else
+        set -- /bin/sh -s -- "$1" "$binary" "$link"
+    fi
+    "$@" <<'LINK_SCRIPT'
+set -eu
+action=$1
+binary=$2
+link=$3
+if [ "$action" = remove ]; then
+    /bin/rm -f "$link"
+    exit 0
+fi
+directory=${link%/*}
+/bin/mkdir -p "$directory"
+staging=$(/usr/bin/mktemp -d "$directory/.kuri.XXXXXX")
+trap '/bin/rm -rf "$staging"' EXIT
+trap 'exit 130' HUP INT TERM
+/bin/ln -s "$binary" "$staging/kuri"
+/bin/mv -fh "$staging/kuri" "$link"
+LINK_SCRIPT
+}
+
+restore_startup() {
+    if "$bootstrap_attempted" && /bin/launchctl print "system/$label" >/dev/null 2>&1; then
+        /bin/launchctl bootout "system/$label" || return 1
+    fi
+    if [ -n "$plist_stage" ] && [ -f "$plist_stage/original.plist" ]; then
+        /bin/mv -fh "$plist_stage/original.plist" "$plist" || return 1
+    elif "$plist_changed"; then
+        /bin/rm -f "$plist" || return 1
+    fi
+    if "$link_created"; then change_link remove || return 1; fi
+    if "$disabled_changed"; then /bin/launchctl disable "system/$label" || return 1; fi
+    if "$bootout_attempted" && ! /bin/launchctl print "system/$label" >/dev/null 2>&1; then
+        clear_activation && /bin/launchctl bootstrap system "$plist" || return 1
+    fi
+}
+
+finish_startup() {
+    result=$?
+    trap - EXIT
+    if [ "$result" -ne 0 ] && ! restore_startup; then
+        printf 'Could not restore the previous kuri installation. Inspect %s and %s. Backup: %s\n' \
+            "$plist" "$link" "${plist_stage:-none}" >&2
+        plist_stage=
+    fi
+    if [ -n "$plist_stage" ]; then /bin/rm -rf "$plist_stage"; fi
+    if [ -n "$staging" ]; then /bin/rm -rf "$staging"; fi
+    exit "$result"
+}
+
+startup_command() {
+    operation=$1
+    binary=$2
+    account=$3
+    template=$4
+
+    if [ "$operation" = --startup-uninstall ]; then
+        if ! exists "$plist"; then fail "$link start is not registered by kuri."; fi
+        [ -f "$plist" ] && protected_by_root "$plist" || fail "Unsafe kuri registration: $plist"
+        if [ "$(plist_value ProgramArguments.0 "$plist")" != "$link" ] ||
+            [ "$(plist_value ProgramArguments.1 "$plist")" != start ]; then
+            fail "$link start is not registered by kuri."
+        fi
+    fi
+    if [ "$operation" = --startup-install ]; then
+        [ "$binary" != "$link" ] || fail 'Run kuri install from the directory containing the original binary.'
+        binary=$(/bin/realpath "$binary") || fail 'Build an executable ./kuri in the current directory before installing.'
+        [ -f "$binary" ] && [ -x "$binary" ] || fail 'Build an executable ./kuri in the current directory before installing.'
+    fi
+
+    lock_installation
+    staging= plist_stage=
+    plist_changed=false link_created=false disabled_changed=false bootout_attempted=false bootstrap_attempted=false
+    trap finish_startup EXIT
+    trap 'exit 130' HUP INT TERM
+    staging=$(/usr/bin/mktemp -d /private/var/tmp/kuri-install.XXXXXX)
+    verify_registration
+    trusted_path "$bin_directory" || fail "Unsafe kuri binary directory: $bin_directory"
+    if exists "$link" && [ ! -L "$link" ] && [ ! -f "$link" ]; then
+        fail "The kuri installation path is not a file or symbolic link: $link"
+    fi
+
+    if [ "$operation" = --startup-uninstall ]; then
+        [ "$registered" = startup ] || fail "$link start is not registered by kuri."
+        require_admin
+        plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
+        if [ -n "$loaded_job" ]; then
+            bootout_attempted=true
+            /bin/launchctl bootout "system/$label"
+        fi
+        /bin/mv -fh "$plist" "$plist_stage/original.plist"
+        change_link remove
+        printf 'Uninstalled kuri startup and removed %s.\n' "$link"
+        return
+    fi
+
+    trusted_path "$binary" || fail "Unsafe kuri source executable path: $binary"
+    if [ "$euid" -eq 0 ]; then
+        /usr/bin/sudo -n -u "$account" -- /bin/test -x "$binary" || fail 'The selected macOS user cannot execute ./kuri.'
+    fi
+    if [ "$registered" = startup ]; then
+        if [ -L "$link" ] && [ "$(/usr/bin/readlink "$link")" = "$binary" ]; then
+            printf 'kuri startup is already installed at %s.\n' "$link"
+            return
+        fi
+        if [ ! -w "$bin_directory" ]; then require_admin; fi
+        change_link replace
+        printf 'Updated %s for the next kuri start.\n' "$link"
+        return
+    fi
+    if exists "$link"; then fail "A file already exists at $link without a kuri startup registration."; fi
+    require_admin
+
+    plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
+    printf '%s\n' "$template" > "$staging/startup.plist"
+    configure_plist "$staging/startup.plist" startup
+    /usr/bin/install -o root -g wheel -m 0644 "$staging/startup.plist" "$plist_stage/startup.plist"
+    if exists "$plist"; then /bin/cp -p "$plist" "$plist_stage/original.plist"; fi
+    disabled_jobs=$(/bin/launchctl print-disabled system)
+    if [ -n "$loaded_job" ]; then
+        bootout_attempted=true
+        /bin/launchctl bootout "system/$label"
+    fi
+    link_created=true
+    change_link replace
+    plist_changed=true
+    /bin/mv -fh "$plist_stage/startup.plist" "$plist"
+    if printf '%s\n' "$disabled_jobs" | /usr/bin/grep -Fq "\"$label\" => disabled"; then
+        disabled_changed=true
+        /bin/launchctl enable "system/$label"
+    fi
+    clear_activation
+    bootstrap_attempted=true
+    /bin/launchctl bootstrap system "$plist"
+    printf 'Installed kuri startup for %s at %s.\n' "$account" "$link"
+}
+
+if [ "$#" -eq 4 ] && { [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ]; }; then
+    startup_command "$@"
+    exit 0
+fi
 
 first_run=false
 eager=false
@@ -19,7 +343,7 @@ else
     printf '%s\n' 'Usage: sudo ./deploy/launchd/install.sh <binary> <macOS username> [--eager]' >&2
     exit 1
 fi
-if [ "$(/usr/bin/id -u)" -ne 0 ]; then
+if [ "$euid" -ne 0 ]; then
     printf '%s\n' 'Run the installer with administrator privileges.' >&2
     exit 1
 fi
@@ -37,10 +361,7 @@ if [ "$uid" -eq 0 ]; then
     printf '%s\n' 'Choose a non-root macOS user for kuri.' >&2
     exit 1
 fi
-if ! "$first_run"; then
-    home=$(/usr/bin/dscl . -read "/Users/$account" NFSHomeDirectory)
-    home=${home#NFSHomeDirectory: }
-fi
+if ! "$first_run"; then home=$(account_home "$account"); fi
 case "$home" in
     /*) ;;
     *) printf '%s\n' 'The kuri user home must be an absolute path.' >&2; exit 1 ;;
@@ -50,31 +371,8 @@ if [ ! -d "$home" ] || [ "$(/usr/bin/stat -L -f '%u' "$home")" -ne "$uid" ]; the
     exit 1
 fi
 
-directory='/Library/Application Support/kuri'
-label='com.github.crmin.kuri'
-plist="/Library/LaunchDaemons/$label.plist"
 activation="$directory/activate-$uid.sock"
-program="$directory/kuri"
-if [ -L "$directory" ]; then
-    printf '%s\n' 'The kuri installation directory cannot be a symlink.' >&2
-    exit 1
-fi
-if [ ! -d "$directory" ]; then
-    /usr/bin/install -o root -g wheel -m 0755 -d "$directory"
-fi
-protected_by_root() {
-    [ ! -L "$1" ] && [ "$(/usr/bin/stat -f '%u' "$1")" -eq 0 ] &&
-        [ "$(( 0$(/usr/bin/stat -f '%Lp' "$1") & 022 ))" -eq 0 ]
-}
-if ! protected_by_root "$directory"; then
-    printf '%s\n' 'The kuri installation directory must be writable only by root.' >&2
-    exit 1
-fi
-install_lock="$directory/.install-lock"
-if ! /bin/mkdir "$install_lock"; then
-    printf '%s\n' 'An installation is already in progress.' >&2
-    exit 1
-fi
+lock_installation
 staging=
 new_program=false
 new_plist=false
@@ -85,7 +383,6 @@ cleanup() {
         if "$new_program"; then /bin/rm "$program"; fi
     fi
     if [ -n "$staging" ]; then /bin/rm -rf "$staging"; fi
-    /bin/rmdir "$install_lock"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
@@ -100,18 +397,17 @@ for path in "$program" "$plist"; do
 done
 
 bootstrap() {
-    # launchd can leave the Unix socket on disk after bootout.
-    if [ -e "$activation" ] || [ -L "$activation" ]; then
-        if [ -L "$activation" ] || [ ! -S "$activation" ] ||
-            [ "$(/usr/bin/stat -f '%u' "$activation")" -ne "$uid" ]; then
-            printf '%s\n' 'Unsafe kuri activation socket path.' >&2
-            return 1
-        fi
-        /bin/rm "$activation"
-    fi
+    clear_activation
     /bin/launchctl enable "system/$label"
     /bin/launchctl bootstrap system "$plist"
 }
+
+modern_registration=false
+if [ -f "$plist" ] && [ "$(plist_value ProgramArguments.0 "$plist")" = "$link" ] &&
+    [ "$(plist_value ProgramArguments.1 "$plist")" = start ]; then
+    modern_registration=true
+    if ! "$first_run"; then fail 'Update this kuri startup registration with ./kuri install.'; fi
+fi
 
 if "$first_run"; then
     if [ -f "$plist" ]; then
@@ -137,6 +433,10 @@ if "$first_run"; then
         bootstrap
         exit 0
     fi
+    if "$modern_registration"; then
+        bootstrap
+        exit 0
+    fi
 fi
 
 staging=$(/usr/bin/mktemp -d -t kuri-install)
@@ -146,15 +446,9 @@ else
     here=$(cd -P "$(dirname "$0")" && pwd)
     /bin/cp "$here/$label.plist" "$staging/$label.plist"
 fi
-/usr/bin/plutil -replace UserName -string "$account" "$staging/$label.plist"
-/usr/bin/plutil -replace EnvironmentVariables.HOME -string "$home" "$staging/$label.plist"
-/usr/bin/plutil -replace Sockets.Control.SockPathName -string "$activation" "$staging/$label.plist"
-/usr/bin/plutil -replace Sockets.Control.SockPathOwner -integer "$uid" "$staging/$label.plist"
-if "$eager"; then
-    /usr/bin/plutil -replace RunAtLoad -bool true "$staging/$label.plist"
-    /usr/bin/plutil -insert ProgramArguments.2 -string --eager "$staging/$label.plist"
-fi
-/usr/bin/plutil -lint "$staging/$label.plist"
+registration=legacy
+if "$eager"; then registration=eager; fi
+configure_plist "$staging/$label.plist" "$registration"
 
 # Read the invoking user's executable with their permissions, even after elevation.
 /usr/bin/sudo -n -u "$account" -- /bin/cat "$binary" > "$staging/kuri"

@@ -14,23 +14,28 @@ go run . start
 
 launchd가 `127.0.0.1:80`과 `[::1]:80`을 열고 kuri는 일반 사용자 권한으로 실행됩니다. LaunchDaemon을 등록한 상태에서 서버가 꺼져 있으면 HTTP 요청으로도 시작할 수 있습니다.
 
-## 업데이트와 자동 실행
+## 부팅 시 자동 실행
 
-launchd는 `/Library/Application Support/kuri/kuri`에 설치한 바이너리를 사용합니다. 바이너리를 업데이트할 때는 저장소 루트에서 다음 명령을 실행합니다. 설치 명령 끝에 `--eager`를 붙이면 부팅할 때 바로 실행합니다.
+저장소 루트에서 바이너리를 빌드하고 설치합니다.
 
 ```sh
 CGO_ENABLED=1 go build -o kuri .
-sudo ./deploy/launchd/install.sh ./kuri "$(id -un)"
+./kuri install
 ```
 
-`stop`으로 현재 프로세스를 종료하면 다음 연결에서 서버를 다시 시작할 수 있습니다. 포트를 닫고 자동 시작을 끄려면 작업 등록을 해제하고 plist를 삭제합니다.
+`install`은 `/usr/local/bin/kuri`를 현재 디렉터리의 `./kuri`에 연결하고 `/usr/local/bin/kuri start`를 macOS 시작 프로그램으로 등록합니다. 관리자 권한이 필요하면 터미널이나 macOS 인증 창에서 권한을 요청합니다. 기존 포트 80용 LaunchDaemon을 전환하는 첫 설치에서는 서버가 잠시 재시작됩니다.
+
+업데이트하려면 새 바이너리를 빌드한 디렉터리에서 `./kuri install`을 다시 실행합니다. 이미 등록되어 있으면 링크만 갱신합니다. 다음 시작부터 새 바이너리를 사용합니다. 원본을 이동한 뒤에는 새 위치에서 설치 명령을 다시 실행합니다.
+
+자동 실행을 제거하려면 다음 명령을 실행합니다.
 
 ```sh
-sudo launchctl bootout system/com.github.crmin.kuri
-sudo rm /Library/LaunchDaemons/com.github.crmin.kuri.plist
+kuri uninstall
 ```
 
-kubeconfig에서 exec 인증을 사용한다면 지정 계정이 터미널 입력 없이 인증할 수 있어야 합니다. plist의 PATH에는 Homebrew와 macOS 기본 바이너리 경로가 있습니다.
+`uninstall`은 시작 프로그램과 링크를 제거합니다. 실행 중인 LaunchDaemon도 종료합니다. `kuri stop`은 현재 서버를 종료합니다. 포트 80이 launchd에 등록되어 있으면 다음 연결에서 서버가 다시 시작될 수 있습니다.
+
+kubeconfig에서 exec 인증을 사용한다면 실행 계정이 터미널 입력 없이 인증할 수 있어야 합니다. plist의 PATH에는 Homebrew와 macOS 기본 바이너리 경로가 있습니다.
 
 ## 명령
 
@@ -43,6 +48,8 @@ kubeconfig에서 exec 인증을 사용한다면 지정 계정이 터미널 입�
 | `go run . start` | 백그라운드에서 실행하고 준비된 서버의 PID를 표시합니다. |
 | `go run . stop` | 백그라운드 서버를 종료하고 해당 PID를 표시합니다. 실행 중인 백그라운드 서버가 없으면 종료 코드 1을 반환합니다. |
 | `go run . status` | 서버 상태, PID, 시작 시각과 연결된 Service를 표시합니다. |
+| `./kuri install` | 현재 디렉터리의 바이너리를 연결하고 부팅 시 자동 실행을 등록합니다. |
+| `kuri uninstall` | 부팅 시 자동 실행 등록과 링크를 제거합니다. |
 
 ## 요청 주소
 

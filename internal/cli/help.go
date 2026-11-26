@@ -9,13 +9,16 @@ func WriteHelp(out io.Writer) error {
 	_, err := fmt.Fprint(out, `kuri routes loopback HTTP requests to Kubernetes services.
 
 Usage:
-  kuri        Run the proxy in the foreground and display logs.
-  kuri help   Show this help and exit.
-  kuri start  Start the proxy in the background.
-  kuri stop   Stop the running background process and print its PID.
-  kuri status Print server status and the active port forwards.
+  kuri           Run the proxy in the foreground and display logs.
+  kuri help      Show this help and exit.
+  kuri start     Start the proxy in the background.
+  kuri stop      Stop the running background process and print its PID.
+  kuri status    Print server status and the active port forwards.
+  kuri install   Link ./kuri into /usr/local/bin and register macOS startup.
+  kuri uninstall Remove the macOS startup registration and installed link.
 
 Use go run . in place of kuri when working from the source directory.
+Build ./kuri in the current directory before running install.
 On the first macOS run, kuri requests administrator approval if it needs
 to register the LaunchDaemon. Later runs reuse the existing registration.
 

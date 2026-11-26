@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -33,6 +34,83 @@ const administratorScript = `on run args
 end run`
 
 func Supported() bool { return true }
+
+func InstallStartup(ctx context.Context, stdout, stderr io.Writer) error {
+	directory, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("find the current directory: %w", err)
+	}
+	return changeStartup(ctx, "install", filepath.Join(directory, "kuri"), stdout, stderr)
+}
+
+func UninstallStartup(ctx context.Context, stdout, stderr io.Writer) error {
+	return changeStartup(ctx, "uninstall", "", stdout, stderr)
+}
+
+func changeStartup(ctx context.Context, operation, source string, stdout, stderr io.Writer) error {
+	account, err := startupAccount()
+	if err != nil {
+		return err
+	}
+	args := []string{"--startup-" + operation, source, account, launchdassets.Plist}
+	return runStartupWithApproval(ctx, operation, stdout, stderr, func(admin bool) ([]byte, error) {
+		return installerCommand(ctx, args, admin).CombinedOutput()
+	})
+}
+
+func startupAccount() (string, error) {
+	uid := strconv.Itoa(os.Geteuid())
+	if uid == "0" {
+		// The script can use the existing registration or console account when
+		// the command was started by root outside sudo.
+		uid = os.Getenv("SUDO_UID")
+		if uid == "" || uid == "0" {
+			return "", nil
+		}
+	}
+	account, err := user.LookupId(uid)
+	if err != nil {
+		return "", fmt.Errorf("look up the requesting macOS account: %w", err)
+	}
+	return account.Username, nil
+}
+
+func runStartupWithApproval(ctx context.Context, operation string, stdout, stderr io.Writer, run func(admin bool) ([]byte, error)) error {
+	out, err := run(false)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 77 && ctx.Err() == nil && os.Geteuid() != 0 {
+		fmt.Fprintf(stderr, "kuri needs administrator approval to %s its startup registration.\n", operation)
+		out, err = run(true)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err != nil {
+		if reason := strings.TrimSpace(string(out)); reason != "" {
+			return fmt.Errorf("%s kuri startup: %s", operation, reason)
+		}
+		return fmt.Errorf("%s kuri startup: %w", operation, err)
+	}
+	_, err = stdout.Write(out)
+	return err
+}
+
+func installerCommand(ctx context.Context, args []string, admin bool) *exec.Cmd {
+	args = append([]string{launchdassets.InstallScript, "kuri-install"}, args...)
+	var cmd *exec.Cmd
+	switch {
+	case !admin || os.Geteuid() == 0:
+		cmd = exec.CommandContext(ctx, "/bin/sh", append([]string{"-c"}, args...)...)
+	case term.IsTerminal(int(os.Stdin.Fd())):
+		cmd = exec.CommandContext(ctx, "/usr/bin/sudo", append([]string{"/bin/sh", "-c"}, args...)...)
+		cmd.Stdin = os.Stdin
+	default:
+		cmd = exec.CommandContext(ctx, "/usr/bin/osascript", append([]string{"-e", administratorScript}, args...)...)
+	}
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 15 * time.Second
+	return cmd
+}
 
 // Register installs the current executable for the requesting account. The
 // privileged script creates sockets, which launchd then hands to that user.
@@ -64,16 +142,11 @@ func Register(ctx context.Context, home, activation string) error {
 	if err != nil {
 		return err
 	}
-	args := []string{launchdassets.InstallScript, "kuri-install", "--first-run", executable, account.Username, home, launchdassets.Plist}
-	var cmd *exec.Cmd
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		cmd = exec.CommandContext(ctx, "/usr/bin/sudo", append([]string{"/bin/sh", "-c"}, args...)...)
-		cmd.Stdin = os.Stdin
-	} else {
-		cmd = exec.CommandContext(ctx, "/usr/bin/osascript", append([]string{"-e", administratorScript}, args...)...)
+	args := []string{"--first-run", executable, account.Username, home, launchdassets.Plist}
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "kuri needs administrator approval to register its LaunchDaemon for loopback port 80.")
 	}
-	fmt.Fprintln(os.Stderr, "kuri needs administrator approval to register its LaunchDaemon for loopback port 80.")
-	out, err := cmd.CombinedOutput()
+	out, err := installerCommand(ctx, args, true).CombinedOutput()
 	if err == nil {
 		return nil
 	}
