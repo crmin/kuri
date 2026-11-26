@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/launchd"
+	"golang.org/x/sys/unix"
 )
 
 type activationRequest struct {
@@ -21,6 +22,9 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// RunAtLoad also leaves the sockets registered for later starts. On
+	// those starts an explicit request already queued by launchd takes priority.
+	eager = eager && !controlRequestQueued(sockets.Control)
 	claims := make(chan activationRequest)
 	chosen := make(chan struct{})
 	go acceptActivation(ctx, sockets.Control, claims, chosen)
@@ -53,6 +57,21 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 	}
 	defer selected.conn.Close()
 	return app.serveActivation(ctx, cancel, listeners, selected)
+}
+
+func controlRequestQueued(listener *net.UnixListener) bool {
+	raw, err := listener.SyscallConn()
+	if err != nil {
+		return false
+	}
+	queued := false
+	_ = raw.Control(func(fd uintptr) {
+		events := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		if n, err := unix.Poll(events, 0); err == nil && n > 0 {
+			queued = events[0].Revents&unix.POLLIN != 0
+		}
+	})
+	return queued
 }
 
 func acceptActivation(ctx context.Context, listener *net.UnixListener, claims chan<- activationRequest, chosen <-chan struct{}) {

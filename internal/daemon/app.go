@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/accesslog"
+	"github.com/crmin/kuri/internal/launchd"
 
 	"golang.org/x/sys/unix"
 )
@@ -23,34 +24,31 @@ type App struct {
 	home, activation string
 	detached         bool
 	stdout, stderr   io.Writer
+	register         func(context.Context) error
+	direct           func(context.Context, string) (int, error)
 }
 
 func New(home, activation string, stdout, stderr io.Writer) *App {
-	return &App{home: home, activation: activation, stdout: stdout, stderr: stderr}
+	app := &App{home: home, activation: activation, stdout: stdout, stderr: stderr}
+	if launchd.Supported() {
+		app.register = func(ctx context.Context) error {
+			return launchd.Register(ctx, app.home, app.activation)
+		}
+	}
+	app.direct = app.startDirect
+	return app
 }
 
 func (app *App) RunForeground(ctx context.Context) error {
-	state, err := app.State(ctx)
-	if err != nil {
-		return err
-	}
-	if state.PID != 0 {
-		return ErrAlreadyRunning
-	}
-	listeners, err := bindHTTP()
-	if err == nil {
-		return app.serve(ctx, foreground, listeners, app.stdout, nil)
-	}
-	if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EADDRINUSE) {
-		if app.hasActivationSocket() {
-			_, err := app.activate(ctx, foreground)
-			return err
-		}
-	}
-	return bindError(err)
+	_, err := app.run(ctx, foreground)
+	return err
 }
 
 func (app *App) Start(ctx context.Context) (int, error) {
+	return app.run(ctx, background)
+}
+
+func (app *App) run(ctx context.Context, mode string) (int, error) {
 	state, err := app.State(ctx)
 	if err != nil {
 		return 0, err
@@ -59,9 +57,31 @@ func (app *App) Start(ctx context.Context) (int, error) {
 		return 0, ErrAlreadyRunning
 	}
 	if app.hasActivationSocket() {
-		return app.activate(ctx, background)
+		pid, err := app.activate(ctx, mode)
+		if !errors.Is(err, errActivationUnavailable) {
+			return pid, err
+		}
 	}
-	return app.startDetached(ctx)
+
+	pid, err := app.direct(ctx, mode)
+	if !errors.Is(err, errBindPermission) || app.register == nil {
+		return pid, err
+	}
+	if err := app.register(ctx); err != nil {
+		return 0, err
+	}
+	return app.activate(ctx, mode)
+}
+
+func (app *App) startDirect(ctx context.Context, mode string) (int, error) {
+	if mode == background {
+		return app.startDetached(ctx)
+	}
+	listeners, err := bindHTTP()
+	if err != nil {
+		return 0, bindError(err)
+	}
+	return os.Getpid(), app.serve(ctx, foreground, listeners, app.stdout, nil)
 }
 
 func (app *App) hasActivationSocket() bool {
@@ -77,6 +97,9 @@ func (app *App) activate(ctx context.Context, mode string) (int, error) {
 	// created the listening socket. Its path is protected by installation.
 	client, err := (&net.Dialer{}).DialContext(startCtx, "unix", app.activation)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || connectionRefused(err) {
+			return 0, fmt.Errorf("%w: %w", errActivationUnavailable, err)
+		}
 		return 0, fmt.Errorf("connect to the launchd activation socket: %w", err)
 	}
 	conn := client.(*net.UnixConn)
@@ -282,7 +305,7 @@ func bindHTTP() ([]net.Listener, error) {
 func bindError(err error) error {
 	switch {
 	case errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM):
-		return errors.New("Permission denied on loopback port 80. Install the kuri LaunchDaemon to run as a normal user.")
+		return errBindPermission
 	case errors.Is(err, unix.EADDRINUSE):
 		return errors.New("Loopback port 80 is already in use.")
 	default:

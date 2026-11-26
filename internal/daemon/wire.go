@@ -23,10 +23,12 @@ const (
 )
 
 var (
-	ErrNoBackground   = errors.New("No background kuri process is running.")
-	ErrAlreadyRunning = errors.New("kuri is already running.")
-	ErrIncompatible   = errors.New("Incompatible kuri control protocol. Update the installed kuri binary.")
-	errNoServer       = errors.New("kuri is not running")
+	ErrNoBackground          = errors.New("No background kuri process is running.")
+	ErrAlreadyRunning        = errors.New("kuri is already running.")
+	ErrIncompatible          = errors.New("Incompatible kuri control protocol. Update the installed kuri binary.")
+	errNoServer              = errors.New("kuri is not running")
+	errBindPermission        = errors.New("permission denied on loopback port 80")
+	errActivationUnavailable = errors.New("kuri LaunchDaemon activation socket is unavailable")
 )
 
 type State struct {
@@ -65,6 +67,8 @@ func failure(err error) reply {
 		return reply{Code: "already_running", Error: err.Error()}
 	case errors.Is(err, ErrIncompatible):
 		return reply{Code: "incompatible", Error: err.Error()}
+	case errors.Is(err, errBindPermission):
+		return reply{Code: "bind_permission", Error: err.Error()}
 	default:
 		return reply{Code: "error", Error: err.Error()}
 	}
@@ -88,6 +92,8 @@ func decodeReply(decoder *json.Decoder) (State, error) {
 		return State{}, ErrAlreadyRunning
 	case "incompatible":
 		return State{}, ErrIncompatible
+	case "bind_permission":
+		return State{}, errBindPermission
 	default:
 		return State{}, errors.New(answer.Error)
 	}

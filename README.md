@@ -2,18 +2,26 @@
 
 kuri는 macOS의 루프백 80번 포트에서 HTTP 요청을 받아 Kubernetes Service로 전달합니다. 서버는 시작할 때 실행 계정의 `$HOME/.kube/config`를 읽습니다.
 
-## 설치
+## 처음 실행
 
-Go 1.27.3과 macOS Command Line Tools가 필요합니다. 저장소 루트에서 빌드한 뒤 LaunchDaemon을 등록합니다.
+Go 1.27.3과 macOS Command Line Tools가 필요합니다. 저장소 루트에서 백그라운드로 실행합니다.
+
+```sh
+go run . start
+```
+
+포그라운드에서 로그를 보려면 `go run .`을 실행합니다. 최초 실행에 LaunchDaemon 등록이 필요하면 kuri가 관리자 인증을 한 번 요청합니다. 등록이 끝나면 같은 명령에서 서버를 시작합니다. 현재 계정용 LaunchDaemon이 이미 등록되어 있으면 기존 등록을 사용합니다.
+
+launchd가 `127.0.0.1:80`과 `[::1]:80`을 열고 kuri는 일반 사용자 권한으로 실행됩니다. LaunchDaemon을 등록한 상태에서 서버가 꺼져 있으면 HTTP 요청으로도 시작할 수 있습니다.
+
+## 업데이트와 자동 실행
+
+launchd는 `/Library/Application Support/kuri/kuri`에 설치한 바이너리를 사용합니다. 바이너리를 업데이트할 때는 저장소 루트에서 다음 명령을 실행합니다. 설치 명령 끝에 `--eager`를 붙이면 부팅할 때 바로 실행합니다.
 
 ```sh
 CGO_ENABLED=1 go build -o kuri .
 sudo ./deploy/launchd/install.sh ./kuri "$(id -un)"
 ```
-
-등록에는 관리자 권한이 필요합니다. launchd가 `127.0.0.1:80`과 `[::1]:80`을 엽니다. kuri는 지정한 계정으로 실행됩니다. 첫 HTTP 연결이나 `start` 요청이 들어오면 서버가 시작됩니다. 부팅할 때 바로 실행하려면 설치 명령 끝에 `--eager`를 붙입니다.
-
-launchd는 `/Library/Application Support/kuri/kuri`에 설치한 바이너리를 실행합니다. 소스에서 다시 빌드한 버전을 적용할 때도 같은 설치 명령을 씁니다. 이 명령은 기존 작업을 종료한 뒤 새 바이너리로 작업을 다시 등록합니다.
 
 `stop`으로 현재 프로세스를 종료하면 다음 연결에서 서버를 다시 시작할 수 있습니다. 포트를 닫고 자동 시작을 끄려면 작업 등록을 해제하고 plist를 삭제합니다.
 
