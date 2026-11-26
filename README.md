@@ -1,74 +1,74 @@
 # kuri
 
-kuri는 macOS의 루프백 80번 포트에서 HTTP 요청을 받아 Kubernetes Service로 전달합니다. 서버는 시작할 때 실행 계정의 `$HOME/.kube/config`를 읽습니다.
+kuri forwards HTTP requests from loopback port 80 on macOS to Kubernetes Services. At startup, kuri reads `$HOME/.kube/config` for the account that runs the server.
 
-## 처음 실행
+## Getting started
 
-Go 1.27.3과 macOS Command Line Tools가 필요합니다. 저장소 루트에서 백그라운드로 실행합니다.
+Follow the [installation steps](#start-at-boot) to build kuri and link it into `/usr/local/bin`. With `kuri` on your `PATH`, start the server in the background.
 
 ```sh
-go run . start
+kuri start
 ```
 
-포그라운드에서 로그를 보려면 `go run .`을 실행합니다. 최초 실행에 LaunchDaemon 등록이 필요하면 kuri가 관리자 인증을 한 번 요청합니다. 등록이 끝나면 같은 명령에서 서버를 시작합니다. 현재 계정용 LaunchDaemon이 이미 등록되어 있으면 기존 등록을 사용합니다.
+To run the server in the foreground and view logs, run `kuri`. If kuri needs to register its LaunchDaemon on the first run, it asks for administrator approval once, then starts the server as part of the same command. If a LaunchDaemon is already registered for your account, kuri reuses it.
 
-launchd가 `127.0.0.1:80`과 `[::1]:80`을 열고 kuri는 일반 사용자 권한으로 실행됩니다. LaunchDaemon을 등록한 상태에서 서버가 꺼져 있으면 HTTP 요청으로도 시작할 수 있습니다.
+launchd opens `127.0.0.1:80` and `[::1]:80`. kuri runs with standard user privileges. Once the LaunchDaemon is registered, an incoming HTTP request can start the server if it is stopped.
 
-## 부팅 시 자동 실행
+## Start at boot
 
-저장소 루트에서 바이너리를 빌드하고 설치합니다.
+You need Go 1.27.3 and the macOS Command Line Tools. Build and install the binary from the repository root.
 
 ```sh
 CGO_ENABLED=1 go build -o kuri .
 ./kuri install
 ```
 
-`install`은 `/usr/local/bin/kuri`를 현재 디렉터리의 `./kuri`에 연결하고 `/usr/local/bin/kuri start`를 macOS 시작 프로그램으로 등록합니다. 관리자 권한이 필요하면 터미널이나 macOS 인증 창에서 권한을 요청합니다. 기존 포트 80용 LaunchDaemon을 전환하는 첫 설치에서는 서버가 잠시 재시작됩니다.
+`install` creates a symbolic link at `/usr/local/bin/kuri` to `./kuri` in the current directory and registers `/usr/local/bin/kuri start` to run when macOS boots. If the installer needs administrator privileges, it prompts you in the terminal or in a macOS authentication dialog. The server restarts briefly if the first installation replaces an existing LaunchDaemon for port 80.
 
-업데이트하려면 새 바이너리를 빌드한 디렉터리에서 `./kuri install`을 다시 실행합니다. 이미 등록되어 있으면 링크만 갱신합니다. 다음 시작부터 새 바이너리를 사용합니다. 원본을 이동한 뒤에는 새 위치에서 설치 명령을 다시 실행합니다.
+To update kuri, run `./kuri install` again from the directory where you built the new binary. If the startup job is already registered, `install` only updates the link. The server uses the new binary the next time it starts. If you move the binary, run the install command again from its new location.
 
-자동 실행을 제거하려면 다음 명령을 실행합니다.
+To remove the startup registration, run the following command.
 
 ```sh
 kuri uninstall
 ```
 
-`uninstall`은 시작 프로그램과 링크를 제거합니다. 실행 중인 LaunchDaemon도 종료합니다. `kuri stop`은 현재 서버를 종료합니다. 포트 80이 launchd에 등록되어 있으면 다음 연결에서 서버가 다시 시작될 수 있습니다.
+`uninstall` removes the startup job and the symbolic link. It also stops the LaunchDaemon if it is running. `kuri stop` stops the current server. If port 80 is still registered with launchd, the next connection can restart the server.
 
-kubeconfig에서 exec 인증을 사용한다면 실행 계정이 터미널 입력 없이 인증할 수 있어야 합니다. plist의 PATH에는 Homebrew와 macOS 기본 바이너리 경로가 있습니다.
+If your kubeconfig uses exec authentication, the account that runs kuri must be able to authenticate without terminal input. The `PATH` in the plist includes the Homebrew and standard macOS binary directories.
 
-## 명령
+## Commands
 
-빌드한 바이너리는 `./kuri`로 실행합니다. 소스 디렉터리에서는 같은 명령을 `go run .`로 실행할 수 있습니다.
+From the directory that contains the built binary, you can also use `./kuri`.
 
-| 명령 | 동작 |
+| Command | Description |
 | --- | --- |
-| `go run .` | 포그라운드에서 실행합니다. 로그는 콘솔과 파일에 남습니다. `Ctrl+C`로 종료합니다. |
-| `go run . help` | 명령과 호스트 형식에 대한 도움말을 표시합니다. |
-| `go run . start` | 백그라운드에서 실행하고 준비된 서버의 PID를 표시합니다. |
-| `go run . stop` | 백그라운드 서버를 종료하고 해당 PID를 표시합니다. 실행 중인 백그라운드 서버가 없으면 종료 코드 1을 반환합니다. |
-| `go run . status` | 서버 상태, PID, 시작 시각과 연결된 Service를 표시합니다. |
-| `./kuri install` | 현재 디렉터리의 바이너리를 연결하고 부팅 시 자동 실행을 등록합니다. |
-| `kuri uninstall` | 부팅 시 자동 실행 등록과 링크를 제거합니다. |
+| `kuri` | Runs in the foreground and writes logs to the console and a file. Press `Ctrl+C` to stop. |
+| `kuri help` | Shows the available commands and host formats. |
+| `kuri start` | Starts the server in the background and prints its PID when it is ready. |
+| `kuri stop` | Stops the background server and prints its PID. Returns exit code 1 if no background server is running. |
+| `kuri status` | Shows the server status, PID, start time, and Services with active port forwards. |
+| `./kuri install` | Links the binary in the current directory and registers it to start at boot. |
+| `kuri uninstall` | Removes the startup registration and the symbolic link. |
 
-## 요청 주소
+## Request hosts
 
-| 호스트 | 라우팅 |
+| Host | Routing |
 | --- | --- |
-| `api.default.dev.kuri.localhost` | `dev` context에서 `default/api`의 기본 포트로 요청을 보냅니다. |
-| `8080.api.default.dev.kuri.localhost` | 같은 Service의 TCP 포트 8080으로 요청을 보냅니다. |
-| `api.default.kuri.localhost` | kubeconfig의 `current-context`에서 `default/api`를 찾습니다. |
+| `api.default.dev.kuri.localhost` | Routes requests to the default port of `default/api` in the `dev` context. |
+| `8080.api.default.dev.kuri.localhost` | Routes requests to TCP port 8080 of the same Service. |
+| `api.default.kuri.localhost` | Looks up `default/api` in the context specified by `current-context` in kubeconfig. |
 
-Service 포트가 하나면 그 포트를 씁니다. 포트가 여러 개면 이름이 `http`인 TCP 포트를 씁니다. 포트 번호를 지정할 때는 Service의 `port`를 사용합니다. kuri는 해당 포트를 Pod의 `targetPort`에 연결합니다.
+For a Service with a single port, kuri uses that port if it is TCP. For a Service with multiple ports, kuri uses the TCP port named `http` by default. To specify a port number in the host, use the Service's `port`. kuri forwards requests to the Pod port identified by the Service's `targetPort`.
 
-context 이름이 소문자 DNS 레이블이면 호스트에 그대로 씁니다. 그 외의 이름은 SHA-256 해시의 처음 16자 앞에 `ctx-`를 붙여 호스트에 넣습니다. 예를 들어 `dev.cluster`의 별칭은 다음 명령으로 확인합니다.
+If the context name is a lowercase DNS label, use it directly in the host. For other names, use `ctx-` followed by the first 16 hexadecimal characters of the SHA-256 hash of the original name. This command prints the alias for `dev.cluster`.
 
 ```sh
 printf 'ctx-%s\n' "$(printf %s 'dev.cluster' | shasum -a 256 | cut -c1-16)"
 ```
 
-## 연결과 접근 로그
+## Port forwards and access logs
 
-최초 연결은 60분 동안 유지합니다. 같은 연결에 요청이 들어오면 만료 시각을 마지막 요청 시각에서 60초 뒤로 설정합니다. kuri는 10초마다 `HEAD /`로 연결을 확인하고 만료 전에 끊기면 다시 연결을 시도합니다. Kubernetes API가 잠시 응답하지 않아도 준비된 포워딩은 계속 쓸 수 있습니다.
+A new port forward starts with a 60-minute lifetime. Each subsequent request on the same forward sets its expiration to 60 seconds after that request. kuri checks the forward every 10 seconds with `HEAD /` and tries to reconnect if it drops before it expires. An active port forward can continue to serve requests during a brief Kubernetes API outage.
 
-`$HOME/.kuri/access.log`에는 요청 결과와 서버 시작 및 종료를 영어로 기록합니다. 형식은 JSON Lines입니다. 새 줄을 저장하기 전에 72시간보다 오래된 로그를 지우고 파일이 100MiB를 넘지 않도록 정리합니다. `status`는 표준 출력에만 표시합니다. 포그라운드 콘솔 출력이 막혀 대기열이 차면 일부 콘솔 로그를 생략하고 파일 기록을 계속합니다. 서버를 종료할 때는 남은 콘솔 로그가 출력되기를 최대 1초 동안 기다립니다. 표준 오류 출력이 가능하면 누락이나 출력 중단을 알립니다.
+kuri records request outcomes and server start and stop events in English in `$HOME/.kuri/access.log` using JSON Lines format. Before writing a new entry, kuri removes entries older than 72 hours and trims the file to keep it within 100 MiB. `status` writes only to standard output. If console output is blocked in foreground mode and the queue fills up, kuri drops some console messages and continues writing to the log file. At shutdown, kuri waits up to one second for pending console messages to print. If standard error is available, kuri reports dropped messages or interrupted console output there.
