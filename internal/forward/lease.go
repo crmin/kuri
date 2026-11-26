@@ -40,16 +40,20 @@ func (lease *Lease) RoundTrip(request *http.Request) (*http.Response, error) {
 	return lease.transport.RoundTrip(request)
 }
 
+func (lease *Lease) isAlive() bool {
+	select {
+	case <-lease.tunnel.Done:
+		return false
+	default:
+		return true
+	}
+}
+
 func (lease *Lease) dial(ctx context.Context, _, _ string) (net.Conn, error) {
 	lease.dialMu.RLock()
 	defer lease.dialMu.RUnlock()
-	if lease.closed {
+	if lease.closed || !lease.isAlive() {
 		return nil, net.ErrClosed
-	}
-	select {
-	case <-lease.tunnel.Done:
-		return nil, net.ErrClosed
-	default:
 	}
 	dialer := net.Dialer{Timeout: time.Second}
 	return dialer.DialContext(ctx, "tcp4", lease.Address())

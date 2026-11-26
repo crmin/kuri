@@ -19,6 +19,7 @@ const (
 	warmLifetime   = 60 * time.Second
 	probeInterval  = 10 * time.Second
 	retryInterval  = 2 * time.Second
+	retryJitter    = time.Second
 	probeTimeout   = 3 * time.Second
 	startupTimeout = 20 * time.Second
 )
@@ -223,7 +224,7 @@ func (m *Manager) await(ctx context.Context, e *entry) (*Lease, error) {
 		if err != nil {
 			return nil, err
 		}
-		if lease != nil {
+		if lease != nil && lease.isAlive() {
 			return lease, ctx.Err()
 		}
 		select {
@@ -363,7 +364,7 @@ func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
 			return nil, err
 		}
 
-		delay := min(retryInterval, time.Until(m.deadline(e)))
+		delay := min(recoveryDelay(), time.Until(m.deadline(e)))
 		if delay <= 0 {
 			break
 		}
@@ -375,6 +376,11 @@ func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
 		}
 	}
 	return nil, errExpired
+}
+
+func recoveryDelay() time.Duration {
+	// Each failed attempt independently waits between 1 and 3 seconds.
+	return retryInterval - retryJitter + time.Duration(rand.Int64N(int64(2*retryJitter)+1))
 }
 
 func (m *Manager) open(ctx context.Context, e *entry, destinations []Destination, verify bool) (*Lease, error) {
@@ -474,7 +480,7 @@ func (m *Manager) Snapshot() []Row {
 	var rows []Row
 	now := time.Now()
 	for _, e := range m.entries {
-		if e.lease != nil && now.Before(e.deadline) {
+		if e.lease != nil && e.lease.isAlive() && now.Before(e.deadline) {
 			rows = append(rows, Row{e.target, e.lease.Destination.PortName, e.lease.LocalPort, e.lease.Connected})
 		}
 	}

@@ -72,7 +72,7 @@ func (k *Kubernetes) Resolve(ctx context.Context, target route.Target, failedPod
 	service, err := client.Services(target.Namespace).Get(ctx, target.Service, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: service %q not found", errRouteUnavailable, target.Service)
+			return nil, fmt.Errorf("Kubernetes service %q not found", target.Service)
 		}
 		return nil, kubernetesError("get Kubernetes service", err)
 	}

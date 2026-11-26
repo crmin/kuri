@@ -257,3 +257,111 @@ func TestRecoveryTriesAlternateReadyPod(t *testing.T) {
 		}
 	})
 }
+
+func TestRequestWaitsForReplacementWhenProbeIsInProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		firstDone := make(chan struct{})
+		finishProbe := make(chan struct{})
+		attempts := 0
+		manager := testManager(stubBackend{
+			open: func(context.Context, Destination, int) (Tunnel, error) {
+				attempts++
+				if attempts == 1 {
+					return Tunnel{Done: firstDone, Close: func() {}}, nil
+				}
+				return stubTunnel(), nil
+			},
+		})
+		manager.probe = func(_ context.Context, lease *Lease) error {
+			if lease.tunnel.Done == firstDone {
+				<-finishProbe
+			}
+			return nil
+		}
+		defer manager.Close()
+		defer func() {
+			select {
+			case <-finishProbe:
+			default:
+				close(finishProbe)
+			}
+		}()
+
+		req := request("api")
+		first := acquire(t, manager, req)
+		time.Sleep(probeInterval)
+		synctest.Wait()
+		close(firstDone)
+		result := make(chan *Lease, 1)
+		go func() {
+			lease, _ := manager.Acquire(t.Context(), req)
+			result <- lease
+		}()
+		synctest.Wait()
+		if len(result) != 0 || len(manager.Snapshot()) != 0 {
+			t.Error("returned an already closed tunnel while the probe was running")
+		}
+		close(finishProbe)
+		if next := <-result; next == first || next == nil {
+			t.Fatal("request did not receive the replacement tunnel")
+		}
+	})
+}
+
+func TestRecoveryRetriesWithoutRequestAndAppliesJitter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		attempts := make(chan time.Time, 2)
+		firstDone := make(chan struct{})
+		backend := stubBackend{
+			resolve: func(_ context.Context, target route.Target, failed string) ([]Destination, error) {
+				if failed == "" {
+					return []Destination{stubDestination(target, "first")}, nil
+				}
+				attempts <- time.Now()
+				if len(attempts) == 1 {
+					return nil, errors.New("Kubernetes service not found")
+				}
+				return []Destination{stubDestination(target, "replacement")}, nil
+			},
+			open: func(_ context.Context, destination Destination, _ int) (Tunnel, error) {
+				if destination.Pod == "first" {
+					return Tunnel{Done: firstDone, Close: func() {}}, nil
+				}
+				return stubTunnel(), nil
+			},
+		}
+		manager := testManager(backend)
+		defer manager.Close()
+		req := request("api")
+		old := acquire(t, manager, req)
+		disconnected := time.Now()
+		close(firstDone)
+		synctest.Wait()
+		if len(attempts) != 1 {
+			t.Fatalf("first recovery was not immediate, attempts=%d", len(attempts))
+		}
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
+		first, second := <-attempts, <-attempts
+		if !first.Equal(disconnected) || second.Sub(first) < time.Second || second.Sub(first) > 3*time.Second {
+			t.Fatalf("recovery attempted at %v and %v", first.Sub(disconnected), second.Sub(disconnected))
+		}
+		if got := acquire(t, manager, req); got == old {
+			t.Fatal("recovery reused the closed tunnel")
+		}
+	})
+}
+
+func TestRecoveryDelayUsesRandomJitter(t *testing.T) {
+	delays := make(map[time.Duration]bool)
+	for range 16 {
+		delay := recoveryDelay()
+		if delay < time.Second || delay > 3*time.Second {
+			t.Fatalf("recovery delay outside jitter bounds: %s", delay)
+		}
+		delays[delay] = true
+	}
+	if len(delays) == 1 {
+		t.Fatal("recovery attempts used a fixed delay")
+	}
+}
