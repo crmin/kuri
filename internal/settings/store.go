@@ -87,15 +87,19 @@ func (s Store) update(ctx context.Context, change func(*Config) error, repair bo
 }
 
 func (s Store) read() (Config, bool, error) {
+	return s.readAt(s.Path())
+}
+
+func (s Store) readAt(path string) (Config, bool, error) {
 	cfg := Defaults(s.home)
-	fd, err := unix.Open(s.Path(), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, false, nil
 	}
 	if err != nil {
 		return Config{}, false, fmt.Errorf("open kuri settings: %w", err)
 	}
-	file := os.NewFile(uintptr(fd), s.Path())
+	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
@@ -120,6 +124,10 @@ func (s Store) read() (Config, bool, error) {
 }
 
 func (s Store) write(cfg Config) error {
+	return s.writeAt(cfg, s.Path())
+}
+
+func (s Store) writeAt(cfg Config, path string) error {
 	dir := s.Directory()
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -140,7 +148,7 @@ func (s Store) write(cfg Config) error {
 	if err := errors.Join(err, file.Close()); err != nil {
 		return err
 	}
-	return os.Rename(file.Name(), s.Path())
+	return os.Rename(file.Name(), path)
 }
 
 func (s Store) lock(ctx context.Context) (*os.File, error) {

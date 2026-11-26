@@ -8,6 +8,7 @@ plist="/Library/LaunchDaemons/$label.plist"
 program="$directory/kuri"
 link='/usr/local/bin/kuri'
 pause_file="$directory/.menu-pause"
+port_change_file="$directory/.port-change"
 bin_directory=${link%/*}
 euid=$(/usr/bin/id -u)
 
@@ -15,6 +16,11 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 exists() { [ -e "$1" ] || [ -L "$1" ]; }
 require_admin() { if [ "$euid" -ne 0 ]; then exit 77; fi; }
 plist_value() { /usr/bin/plutil -extract "$1" raw -o - "$2"; }
+
+valid_port() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 5 ] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
 
 protected_by_root() {
     [ ! -L "$1" ] && [ "$(/usr/bin/stat -f '%u' "$1")" -eq 0 ] &&
@@ -59,6 +65,8 @@ configure_plist() {
     /usr/bin/plutil -replace EnvironmentVariables.HOME -string "$home" "$1"
     /usr/bin/plutil -replace Sockets.Control.SockPathName -string "$activation" "$1"
     /usr/bin/plutil -replace Sockets.Control.SockPathOwner -integer "$uid" "$1"
+    /usr/bin/plutil -replace Sockets.HTTP.0.SockServiceName -integer "${3:-80}" "$1"
+    /usr/bin/plutil -replace Sockets.HTTP.1.SockServiceName -integer "${3:-80}" "$1"
     case "$2" in
         eager)
             /usr/bin/plutil -replace RunAtLoad -bool true "$1"
@@ -135,6 +143,7 @@ read_loaded_job() {
 
 verify_registration() {
     registered=none
+    registered_port=
     home=
     if exists "$plist"; then
         [ -f "$plist" ] && protected_by_root "$plist" || fail "Unsafe kuri registration: $plist"
@@ -166,8 +175,10 @@ verify_registration() {
                 ;;
             *) fail 'The existing LaunchDaemon is not a recognized kuri registration.' ;;
         esac
+        registered_port=$(plist_value Sockets.HTTP.0.SockServiceName "$plist") || fail 'Could not read the registered kuri port.'
+        valid_port "$registered_port" || fail 'Invalid registered kuri port.'
         printf '%s\n' "$template" > "$staging/expected.plist"
-        configure_plist "$staging/expected.plist" "$registered"
+        configure_plist "$staging/expected.plist" "$registered" "$registered_port"
         expected=$(/usr/bin/plutil -convert xml1 -o - "$staging/expected.plist")
         actual=$(/usr/bin/plutil -convert xml1 -o - "$plist")
         [ "$expected" = "$actual" ] || fail 'The existing LaunchDaemon is not a recognized kuri registration.'
@@ -214,6 +225,9 @@ restore_startup() {
     elif "$plist_changed"; then
         /bin/rm -f "$plist" || return 1
     fi
+    if [ -n "$plist_stage" ] && [ -f "$plist_stage/original.pause" ]; then
+        /bin/mv -fh "$plist_stage/original.pause" "$pause_file" || return 1
+    fi
     if "$link_created"; then change_link remove || return 1; fi
     if "$disabled_changed"; then /bin/launchctl disable "system/$label" || return 1; fi
     if "$bootout_attempted" && ! /bin/launchctl print "system/$label" >/dev/null 2>&1; then
@@ -230,8 +244,32 @@ finish_startup() {
         plist_stage=
     fi
     if [ -n "$plist_stage" ]; then /bin/rm -rf "$plist_stage"; fi
+    if [ -n "$record" ]; then /bin/rm -f "$record"; fi
     if [ -n "$staging" ]; then /bin/rm -rf "$staging"; fi
     exit "$result"
+}
+
+await_startup_handoff() {
+    [ -n "$handoff_directory" ] || return 0
+    case "$handoff_directory" in
+        "$home/.kuri/.startup-handoff-"*) ;;
+        *) fail 'Invalid kuri startup handoff directory.' ;;
+    esac
+    handoff_name=${handoff_directory##*/}
+    [ "$handoff_directory" = "$home/.kuri/$handoff_name" ] || fail 'Invalid kuri startup handoff path.'
+    case "${handoff_name#.startup-handoff-}" in
+        ''|*[!A-Za-z0-9]*) fail 'Invalid kuri startup handoff operation.' ;;
+    esac
+    /usr/bin/sudo -n -u "$account" -- /bin/sh -c '
+        : > "$1/ready"
+        ticks=0
+        while [ "$ticks" -lt 60 ]; do
+            [ ! -f "$1/continue" ] || exit 0
+            /bin/sleep 1
+            ticks=$((ticks + 1))
+        done
+        exit 1
+    ' kuri-startup-handoff "$handoff_directory" || fail 'The running kuri proxy did not release its listener.'
 }
 
 startup_command() {
@@ -239,8 +277,13 @@ startup_command() {
     binary=$2
     account=$3
     template=$4
+    requested_port=${5:-80}
+    keep_paused=${6:-}
+    handoff_directory=${7:-}
+    [ -z "$keep_paused" ] || [ "$keep_paused" = --keep-paused ] || fail 'Invalid kuri startup option.'
+    valid_port "$requested_port" || fail 'Invalid kuri server port.'
 
-    if [ "$operation" = --startup-uninstall ]; then
+    if [ "$operation" != --startup-install ]; then
         if ! exists "$plist"; then fail "$link start is not registered by kuri."; fi
         [ -f "$plist" ] && protected_by_root "$plist" || fail "Unsafe kuri registration: $plist"
     fi
@@ -251,7 +294,7 @@ startup_command() {
     fi
 
     lock_installation
-    staging= plist_stage=
+    staging= plist_stage= record=
     plist_changed=false link_created=false disabled_changed=false bootout_attempted=false bootstrap_attempted=false
     trap finish_startup EXIT
     trap 'exit 130' HUP INT TERM
@@ -259,16 +302,29 @@ startup_command() {
     verify_registration
     if [ "$operation" = --startup-install ]; then
         read_menu_pause
-        [ -z "$pause_stage" ] || [ "$pause_stage" = completed ] ||
-            fail 'Run kuri start to resume the paused registration before installing.'
+        case "$pause_stage" in
+            ''|completed) ;;
+            paused)
+                [ "$keep_paused" = --keep-paused ] && [ "$registered" != none ] && [ -z "$loaded_job" ] ||
+                    fail 'Run kuri start to resume the paused registration before installing.'
+                digest=$(/usr/bin/shasum -a 256 < "$plist" | /usr/bin/awk '{print $1}')
+                [ "$saved_uid" = "$uid" ] && [ "$saved_digest" = "$digest" ] ||
+                    fail 'The paused kuri registration has changed.'
+                ;;
+            *) fail 'Run kuri start to resume the paused registration before installing.' ;;
+        esac
     fi
     trusted_path "$bin_directory" || fail "Unsafe kuri binary directory: $bin_directory"
     if exists "$link" && [ ! -L "$link" ] && [ ! -f "$link" ]; then
         fail "The kuri installation path is not a file or symbolic link: $link"
     fi
 
-    if [ "$operation" = --startup-uninstall ]; then
-        [ "$registered" = startup ] || [ "$registered" = eager ] || fail "$link start is not registered by kuri."
+    if [ "$operation" != --startup-install ]; then
+        if [ "$operation" = --startup-unregister-sockets ]; then
+            [ "$registered" = legacy ] || fail 'There is no matching kuri socket-only registration.'
+        else
+            [ "$registered" = startup ] || [ "$registered" = eager ] || fail "$link start is not registered by kuri."
+        fi
         require_admin
         plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
         if [ -n "$loaded_job" ]; then
@@ -278,7 +334,12 @@ startup_command() {
         /bin/mv -fh "$plist" "$plist_stage/original.plist"
         if [ "$registered" = startup ]; then change_link remove; fi
         if exists "$pause_file"; then /bin/rm -f "$pause_file"; fi
-        printf 'Uninstalled kuri startup and removed %s.\n' "$link"
+        if exists "$port_change_file"; then /bin/rm -f "$port_change_file"; fi
+        if [ "$registered" = startup ]; then
+            printf 'Uninstalled kuri startup and removed %s.\n' "$link"
+        else
+            printf 'Removed the kuri LaunchDaemon registration.\n'
+        fi
         return
     fi
 
@@ -298,12 +359,14 @@ startup_command() {
     fi
     if exists "$link"; then fail "A file already exists at $link without a kuri startup registration."; fi
     require_admin
+    await_startup_handoff
 
     plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
     printf '%s\n' "$template" > "$staging/startup.plist"
-    configure_plist "$staging/startup.plist" startup
+    configure_plist "$staging/startup.plist" startup "$requested_port"
     /usr/bin/install -o root -g wheel -m 0644 "$staging/startup.plist" "$plist_stage/startup.plist"
     if exists "$plist"; then /bin/cp -p "$plist" "$plist_stage/original.plist"; fi
+    if [ "$pause_stage" = paused ]; then /bin/cp -p "$pause_file" "$plist_stage/original.pause"; fi
     disabled_jobs=$(/bin/launchctl print-disabled system)
     if [ -n "$loaded_job" ]; then
         bootout_attempted=true
@@ -317,9 +380,15 @@ startup_command() {
         disabled_changed=true
         /bin/launchctl enable "system/$label"
     fi
-    clear_activation
-    bootstrap_attempted=true
-    /bin/launchctl bootstrap system "$plist"
+    if [ "$pause_stage" = paused ]; then
+        digest=$(/usr/bin/shasum -a 256 < "$plist" | /usr/bin/awk '{print $1}')
+        operation=$saved_operation
+        write_menu_pause paused
+    else
+        clear_activation
+        bootstrap_attempted=true
+        /bin/launchctl bootstrap system "$plist"
+    fi
     printf 'Installed kuri startup for %s at %s.\n' "$account" "$link"
 }
 
@@ -512,7 +581,108 @@ upgrade_policy_command() {
     replacement=
 }
 
+write_port_change() {
+    transition_tmp=$(/usr/bin/mktemp "$directory/.port-change.XXXXXX")
+    /bin/chmod 0644 "$transition_tmp"
+    printf '%s\n' "$boot_session" "$uid" "$operation" "$1" > "$transition_tmp"
+    /bin/mv -fh "$transition_tmp" "$port_change_file"
+    transition_tmp=
+}
+
+finish_port_change() {
+    result=$?
+    trap - EXIT
+    if [ "$result" -ne 0 ] && "$port_mutated"; then
+        if /bin/launchctl print "system/$label" >/dev/null 2>&1; then
+            /bin/launchctl bootout "system/$label" || result=2
+        fi
+        /bin/mv -fh "$plist_stage/original.plist" "$plist" || result=2
+        if [ -f "$staging/original.pause" ]; then
+            /bin/mv -fh "$staging/original.pause" "$pause_file" || result=2
+        fi
+        if "$port_was_loaded"; then
+            write_port_change "$registered_port" || result=2
+            clear_activation && /bin/launchctl bootstrap system "$plist" || result=2
+        fi
+    fi
+    if [ "$result" -eq 2 ]; then
+        printf 'Could not restore the previous kuri port registration. Backup: %s\n' "$plist_stage" >&2
+    elif [ -n "$plist_stage" ]; then
+        /bin/rm -rf "$plist_stage"
+    fi
+    if [ -n "$transition_tmp" ]; then /bin/rm -f "$transition_tmp"; fi
+    if [ -n "$record" ]; then /bin/rm -f "$record"; fi
+    /bin/rm -rf "$staging"
+    exit "$result"
+}
+
+configure_port_command() {
+    requested_home=$2
+    account=$3
+    template=$4
+    requested_port=$5
+    operation=$6
+    valid_port "$requested_port" || fail 'Invalid kuri server port.'
+    case "$operation" in ''|*[!A-Za-z0-9]*) fail 'Invalid kuri port operation.' ;; esac
+    lock_installation
+    staging=$(/usr/bin/mktemp -d /private/var/tmp/kuri-port.XXXXXX)
+    plist_stage= transition_tmp= record=
+    port_mutated=false port_was_loaded=false
+    trap finish_port_change EXIT
+    trap 'exit 130' HUP INT TERM
+    verify_registration
+    [ "$registered" != none ] && [ "$requested_home" = "$home" ] || fail 'No matching kuri LaunchDaemon is registered.'
+    if [ "$requested_port" = "$registered_port" ]; then
+        printf 'unchanged\n'
+        return
+    fi
+    read_menu_pause
+    if [ -n "$pause_stage" ]; then
+        old_digest=$(/usr/bin/shasum -a 256 < "$plist" | /usr/bin/awk '{print $1}')
+        [ "$saved_uid" = "$uid" ] && [ "$saved_digest" = "$old_digest" ] ||
+            fail 'The paused kuri registration has changed.'
+        [ "$pause_stage" = paused ] || [ "$pause_stage" = completed ] ||
+            fail 'Finish the current kuri registration operation before changing the port.'
+    fi
+    require_admin
+    boot_session=$(/usr/sbin/sysctl -n kern.bootsessionuuid) || fail 'Could not identify the current boot session.'
+    [ -n "$boot_session" ] || fail 'Could not identify the current boot session.'
+    plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
+    /bin/cp -p "$plist" "$plist_stage/original.plist"
+    /bin/cp -p "$plist" "$plist_stage/next.plist"
+    /usr/bin/plutil -replace Sockets.HTTP.0.SockServiceName -integer "$requested_port" "$plist_stage/next.plist"
+    /usr/bin/plutil -replace Sockets.HTTP.1.SockServiceName -integer "$requested_port" "$plist_stage/next.plist"
+    /usr/bin/plutil -lint -s "$plist_stage/next.plist"
+    if [ -n "$pause_stage" ]; then /bin/cp -p "$pause_file" "$staging/original.pause"; fi
+    port_mutated=true
+    if [ -n "$loaded_job" ]; then
+        port_was_loaded=true
+        write_port_change "$requested_port"
+        /bin/launchctl bootout "system/$label"
+    fi
+    /bin/mv -fh "$plist_stage/next.plist" "$plist"
+    if [ -n "$pause_stage" ]; then
+        digest=$(/usr/bin/shasum -a 256 < "$plist" | /usr/bin/awk '{print $1}')
+        port_operation=$operation
+        operation=$saved_operation
+        write_menu_pause "$pause_stage"
+        operation=$port_operation
+    fi
+    if "$port_was_loaded"; then
+        clear_activation
+        /bin/launchctl bootstrap system "$plist"
+        printf 'loaded\n'
+    else
+        printf 'unloaded\n'
+    fi
+}
+
 case "${1:-}" in
+    --configure-port)
+        [ "$#" -eq 6 ] || fail 'Invalid kuri port change request.'
+        configure_port_command "$@"
+        exit 0
+        ;;
     --upgrade-policy)
         [ "$#" -eq 5 ] || fail 'Invalid kuri policy update request.'
         upgrade_policy_command "$@"
@@ -525,19 +695,25 @@ case "${1:-}" in
         ;;
 esac
 
-if [ "$#" -eq 4 ] && { [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ]; }; then
+if { [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && {
+    [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ] || [ "$1" = --startup-unregister-sockets ]
+}; then
     startup_command "$@"
     exit 0
 fi
 
 first_run=false
 eager=false
-if [ "${1:-}" = "--first-run" ] && [ "$#" -eq 5 ]; then
+requested_port=80
+operation=
+if [ "${1:-}" = "--first-run" ] && { [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; }; then
     first_run=true
     binary=$2
     account=$3
     home=$4
     template=$5
+    requested_port=${6:-80}
+    operation=${7:-}
 elif [ "$#" -eq 2 ] || { [ "$#" -eq 3 ] && [ "$3" = "--eager" ]; }; then
     binary=$1
     account=$2
@@ -548,6 +724,8 @@ else
     printf '%s\n' 'Usage: sudo ./deploy/launchd/install.sh <binary> <macOS username> [--eager]' >&2
     exit 1
 fi
+valid_port "$requested_port" || fail 'Invalid kuri server port.'
+case "$operation" in *[!A-Za-z0-9]*) fail 'Invalid kuri port operation.' ;; esac
 if [ "$euid" -ne 0 ]; then
     printf '%s\n' 'Run the installer with administrator privileges.' >&2
     exit 1
@@ -581,12 +759,16 @@ lock_installation
 staging=
 new_program=false
 new_plist=false
+new_transition=false
+transition_tmp=
 cleanup() {
     result=$?
     if "$first_run" && [ "$result" -ne 0 ]; then
         if "$new_plist"; then /bin/rm "$plist"; fi
         if "$new_program"; then /bin/rm "$program"; fi
+        if "$new_transition"; then /bin/rm -f "$port_change_file"; fi
     fi
+    if [ -n "$transition_tmp" ]; then /bin/rm -f "$transition_tmp"; fi
     if [ -n "$staging" ]; then /bin/rm -rf "$staging"; fi
 }
 trap cleanup EXIT
@@ -655,7 +837,7 @@ else
 fi
 registration=legacy
 if "$eager"; then registration=eager; fi
-configure_plist "$staging/$label.plist" "$registration"
+configure_plist "$staging/$label.plist" "$registration" "$requested_port"
 
 # Read the invoking user's executable with their permissions, even after elevation.
 /usr/bin/sudo -n -u "$account" -- /bin/cat "$binary" > "$staging/kuri"
@@ -667,6 +849,12 @@ if [ ! -e "$program" ]; then new_program=true; fi
 if [ ! -e "$plist" ]; then new_plist=true; fi
 if ! "$first_run" || "$new_plist"; then
     /usr/bin/install -o root -g wheel -m 0644 "$staging/$label.plist" "$plist"
+fi
+if [ -n "$operation" ]; then
+    boot_session=$(/usr/sbin/sysctl -n kern.bootsessionuuid) || fail 'Could not identify the current boot session.'
+    [ -n "$boot_session" ] || fail 'Could not identify the current boot session.'
+    write_port_change "$requested_port"
+    new_transition=true
 fi
 bootstrap
 printf 'Registered %s for %s.\n' "$label" "$account"

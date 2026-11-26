@@ -12,11 +12,10 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/route"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 const (
-	coldLifetime   = 60 * time.Minute
-	warmLifetime   = 60 * time.Second
 	probeInterval  = 10 * time.Second
 	retryInterval  = 2 * time.Second
 	retryJitter    = time.Second
@@ -59,6 +58,7 @@ type Row struct {
 	LastAccess  *time.Time `json:"last_access,omitempty"`
 	DefaultPort bool       `json:"default_port,omitempty"`
 	MenuHost    string     `json:"menu_host,omitempty"`
+	MenuLabel   string     `json:"menu_label,omitempty"`
 }
 
 type Manager struct {
@@ -69,12 +69,24 @@ type Manager struct {
 	minPort, maxPort int
 	checkPort        func(int) error
 	probe            func(context.Context, *Lease) error
+	ports            *portPool
 
-	mu           sync.Mutex
-	entries      map[route.Target]*entry
-	defaults     map[route.Target]int32
-	lookups      map[route.Target]*lookup
-	reservations map[int]*entry
+	mu        sync.Mutex
+	entries   map[route.Target]*entry
+	defaults  map[route.Target]int32
+	lookups   map[route.Target]*lookup
+	ephemeral map[*entry]struct{}
+	keepAlive bool
+	lifetime  time.Duration
+	trigger   string
+	enabled   func(string) bool
+	history   []Row
+}
+
+type portPool struct {
+	mu      sync.Mutex
+	owners  map[int]*entry
+	changed chan struct{}
 }
 
 type lookup struct {
@@ -84,12 +96,14 @@ type lookup struct {
 }
 
 type entry struct {
-	target   route.Target
-	host     string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	finished chan struct{}
-	wake     chan struct{}
+	owner     *Manager
+	target    route.Target
+	host      string
+	ctx       context.Context
+	cancel    context.CancelFunc
+	finished  chan struct{}
+	wake      chan struct{}
+	ephemeral bool
 
 	// Protected by Manager.mu.
 	changed    chan struct{}
@@ -97,10 +111,25 @@ type entry struct {
 	lease      *Lease
 	err        error
 	lastAccess time.Time
+	opened     time.Time
+	users      int
+	retired    bool
 }
 
 func NewManager(backend Backend) *Manager {
-	return newManager(backend, 30000, 40000, checkLocalPort, probeHTTP)
+	return NewManagerWithPolicy(backend, settings.Defaults("").PortForward)
+}
+
+func NewManagerWithPolicy(backend Backend, policy settings.PortForward) *Manager {
+	manager := newManager(backend, policy.MinPort, policy.MaxPort+1, checkLocalPort, probeHTTP)
+	manager.UpdatePolicy(policy, nil)
+	return manager
+}
+
+func (m *Manager) NextBackend(backend Backend, policy settings.PortForward) *Manager {
+	next := NewManagerWithPolicy(backend, policy)
+	next.ports = m.ports
+	return next
 }
 
 func newManager(backend Backend, minPort, maxPort int, check func(int) error, probe func(context.Context, *Lease) error) *Manager {
@@ -109,18 +138,37 @@ func newManager(backend Backend, minPort, maxPort int, check func(int) error, pr
 		backend: backend, ctx: ctx, cancel: cancel, minPort: minPort, maxPort: maxPort,
 		checkPort: check, probe: probe,
 		entries: make(map[route.Target]*entry), defaults: make(map[route.Target]int32),
-		lookups: make(map[route.Target]*lookup), reservations: make(map[int]*entry),
+		lookups: make(map[route.Target]*lookup), ephemeral: make(map[*entry]struct{}),
+		ports:     &portPool{owners: make(map[int]*entry), changed: make(chan struct{})},
+		keepAlive: true, lifetime: 60 * time.Minute, trigger: settings.LastRequest,
 	}
 }
 
 func (m *Manager) Acquire(ctx context.Context, request route.Request) (*Lease, error) {
+	lease, release, err := m.AcquireRequest(ctx, request)
+	if err == nil {
+		release()
+	}
+	return lease, err
+}
+
+func (m *Manager) AcquireRequest(ctx context.Context, request route.Request) (*Lease, func(), error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	m.mu.Lock()
 	if m.ctx.Err() != nil {
 		m.mu.Unlock()
-		return nil, errClosed
+		return nil, nil, errClosed
+	}
+	if m.enabled != nil && !m.enabled(request.Context) {
+		m.mu.Unlock()
+		return nil, nil, errors.New("the Kubernetes context is disabled")
+	}
+	if !m.keepAlive {
+		m.workers.Add(1)
+		m.mu.Unlock()
+		return m.acquireEphemeral(ctx, request)
 	}
 
 	target := request.Target
@@ -144,10 +192,10 @@ func (m *Manager) Acquire(ctx context.Context, request route.Request) (*Lease, e
 
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	case <-pending.done:
 		if pending.err != nil {
-			return nil, pending.err
+			return nil, nil, pending.err
 		}
 		return m.await(ctx, pending.entry)
 	}
@@ -160,13 +208,12 @@ func (m *Manager) useLocked(e *entry) bool {
 	if !e.deadline.IsZero() {
 		now := time.Now()
 		if !now.Before(e.deadline) {
-			m.removeLocked(e, errExpired)
+			m.retireLocked(e, errExpired)
 			return false
 		}
-		e.deadline = now.Add(warmLifetime)
-		select {
-		case e.wake <- struct{}{}:
-		default:
+		if m.trigger == settings.LastRequest {
+			e.deadline = now.Add(m.lifetime)
+			e.wakeLocked()
 		}
 	}
 	return true
@@ -195,7 +242,7 @@ func (m *Manager) load(req route.Request, pending *lookup) {
 		pending.err = errors.New("service has no eligible pod")
 		return
 	}
-	if m.ctx.Err() != nil {
+	if m.ctx.Err() != nil || !m.keepAlive || (m.enabled != nil && !m.enabled(req.Context)) {
 		pending.err = errClosed
 		return
 	}
@@ -206,7 +253,7 @@ func (m *Manager) load(req route.Request, pending *lookup) {
 	if !m.useLocked(e) {
 		entryContext, cancelEntry := context.WithCancel(m.ctx)
 		e = &entry{
-			target: key, host: req.Host, ctx: entryContext, cancel: cancelEntry,
+			owner: m, target: key, host: req.Host, ctx: entryContext, cancel: cancelEntry,
 			finished: make(chan struct{}), changed: make(chan struct{}), wake: make(chan struct{}, 1),
 		}
 		m.entries[key] = e
@@ -220,26 +267,41 @@ func (m *Manager) load(req route.Request, pending *lookup) {
 	pending.entry = e
 }
 
-func (m *Manager) await(ctx context.Context, e *entry) (*Lease, error) {
+func (m *Manager) await(ctx context.Context, e *entry) (*Lease, func(), error) {
 	for {
 		m.mu.Lock()
 		changed, lease, err := e.changed, e.lease, e.err
+		if e.retired && err == nil {
+			err = errExpired
+		}
 		if err == nil && lease != nil && lease.isAlive() {
 			if err = ctx.Err(); err == nil {
 				e.lastAccess = time.Now()
+				e.users++
+				m.recordLocked(e)
 			}
 			m.mu.Unlock()
-			return lease, err
+			if err != nil {
+				return nil, nil, err
+			}
+			return lease, sync.OnceFunc(func() {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				e.users--
+				if e.users == 0 && e.retired {
+					e.cancel()
+				}
+			}), nil
 		}
 		m.mu.Unlock()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-m.ctx.Done():
-			return nil, errClosed
+			return nil, nil, errClosed
 		case <-changed:
 		}
 	}
@@ -254,10 +316,11 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 
 	for err == nil {
 		m.mu.Lock()
-		if e.deadline.IsZero() {
-			e.deadline = lease.Connected.Add(coldLifetime)
+		if e.opened.IsZero() {
+			e.opened = lease.Connected
+			e.deadline = e.opened.Add(m.lifetime)
 		}
-		if e.err != nil || !time.Now().Before(e.deadline) {
+		if e.err != nil || e.retired || !m.containsPortLocked(lease.LocalPort) || !time.Now().Before(e.deadline) {
 			m.mu.Unlock()
 			m.release(e, lease)
 			err = errExpired
@@ -265,6 +328,9 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 		}
 		e.lease = lease
 		e.notifyLocked()
+		m.ports.mu.Lock()
+		m.ports.signal()
+		m.ports.mu.Unlock()
 		m.mu.Unlock()
 
 		recoverable := m.watch(e, lease)
@@ -288,7 +354,14 @@ func (e *entry) notifyLocked() {
 	e.changed = make(chan struct{})
 }
 
-func (m *Manager) removeLocked(e *entry, err error) {
+func (e *entry) wakeLocked() {
+	select {
+	case e.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) forgetLocked(e *entry) {
 	if m.entries[e.target] == e {
 		delete(m.entries, e.target)
 		key := defaultTarget(e.target)
@@ -296,6 +369,19 @@ func (m *Manager) removeLocked(e *entry, err error) {
 			delete(m.defaults, key)
 		}
 	}
+}
+
+func (m *Manager) retireLocked(e *entry, err error) {
+	m.forgetLocked(e)
+	e.retired = true
+	e.wakeLocked()
+	if e.users == 0 {
+		m.removeLocked(e, err)
+	}
+}
+
+func (m *Manager) removeLocked(e *entry, err error) {
+	m.forgetLocked(e)
 	if e.err == nil {
 		e.err = err
 		e.cancel()
@@ -315,8 +401,18 @@ func (m *Manager) watch(e *entry, lease *Lease) bool {
 	timer := time.NewTimer(time.Until(m.deadline(e)))
 	defer timer.Stop()
 	for {
-		expires := m.deadline(e)
-		if !time.Now().Before(expires) {
+		m.mu.Lock()
+		expires, retired := e.deadline, e.retired
+		if !retired && !time.Now().Before(expires) {
+			m.retireLocked(e, errExpired)
+			retired = true
+		}
+		m.mu.Unlock()
+		if retired {
+			select {
+			case <-e.ctx.Done():
+			case <-lease.tunnel.Done:
+			}
 			return false
 		}
 		timer.Reset(time.Until(expires))
@@ -326,16 +422,22 @@ func (m *Manager) watch(e *entry, lease *Lease) bool {
 		case <-e.wake:
 		case <-timer.C:
 		case <-lease.tunnel.Done:
-			return true
+			return m.canRecover(e)
 		case <-probes.C:
 			ctx, cancel := context.WithTimeout(e.ctx, probeTimeout)
 			err := m.probe(ctx, lease)
 			cancel()
 			if err != nil {
-				return true
+				return m.canRecover(e)
 			}
 		}
 	}
+}
+
+func (m *Manager) canRecover(e *entry) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !e.retired && e.ctx.Err() == nil
 }
 
 func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
@@ -396,12 +498,19 @@ func (m *Manager) open(ctx context.Context, e *entry, destinations []Destination
 	for _, destination := range destinations {
 		skipped := make(map[int]bool)
 		for ctx.Err() == nil {
-			port, evicted, err := m.reserve(e, skipped)
+			port, evicted, err := m.reserve(ctx, e, skipped)
 			if err != nil {
 				return nil, err
 			}
 			if evicted != nil {
-				<-evicted.finished
+				select {
+				case <-ctx.Done():
+					// The old listener still owns the port until it closes.
+					<-evicted.finished
+					m.unreserve(e, port)
+					return nil, ctx.Err()
+				case <-evicted.finished:
+				}
 			}
 			tunnel, err := m.backend.Open(ctx, destination, port)
 			if err != nil {
@@ -437,22 +546,58 @@ func (m *Manager) open(ctx context.Context, e *entry, destinations []Destination
 	return nil, last
 }
 
-func (m *Manager) reserve(e *entry, skipped map[int]bool) (int, *entry, error) {
+func (m *Manager) reserve(ctx context.Context, e *entry, skipped map[int]bool) (int, *entry, error) {
+	for {
+		port, evicted, changed := m.tryReserve(e, skipped)
+		if port != 0 {
+			return port, evicted, nil
+		}
+		if changed == nil {
+			return 0, nil, errors.New("no local port available in the forwarding range")
+		}
+		select {
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (m *Manager) tryReserve(e *entry, skipped map[int]bool) (int, *entry, <-chan struct{}) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.ports.mu.Lock()
+	defer m.ports.mu.Unlock()
 
+	var wait <-chan struct{}
 	for _, offset := range rand.Perm(m.maxPort - m.minPort) {
 		port := m.minPort + offset
-		if skipped[port] || m.reservations[port] != nil || m.checkPort(port) != nil {
+		if skipped[port] {
 			continue
 		}
-		m.reservations[port] = e
+		if current := m.ports.owners[port]; current != nil {
+			if current != e && (current.owner != m || current.ephemeral || current.retired || current.lease == nil) {
+				wait = m.ports.changed
+			}
+			continue
+		}
+		if m.checkPort(port) != nil {
+			continue
+		}
+		m.ports.owners[port] = e
 		return port, nil, nil
 	}
 
+	if e.ephemeral {
+		return 0, nil, wait
+	}
 	var oldest *entry
 	for _, current := range m.entries {
 		if current == e || current.lease == nil {
+			continue
+		}
+		port := current.lease.LocalPort
+		if port < m.minPort || port >= m.maxPort || skipped[port] || m.ports.owners[port] != current {
 			continue
 		}
 		if oldest == nil || current.lease.Connected.Before(oldest.lease.Connected) ||
@@ -461,20 +606,26 @@ func (m *Manager) reserve(e *entry, skipped map[int]bool) (int, *entry, error) {
 		}
 	}
 	if oldest == nil {
-		return 0, nil, errors.New("no local port available in the forwarding range")
+		return 0, nil, wait
 	}
 	port := oldest.lease.LocalPort
-	m.reservations[port] = e
+	m.ports.owners[port] = e
 	m.removeLocked(oldest, errEvicted)
 	return port, oldest, nil
 }
 
 func (m *Manager) unreserve(e *entry, port int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.reservations[port] == e {
-		delete(m.reservations, port)
+	m.ports.mu.Lock()
+	defer m.ports.mu.Unlock()
+	if m.ports.owners[port] == e {
+		delete(m.ports.owners, port)
+		m.ports.signal()
 	}
+}
+
+func (p *portPool) signal() {
+	close(p.changed)
+	p.changed = make(chan struct{})
 }
 
 func (m *Manager) release(e *entry, lease *Lease) {
@@ -488,6 +639,11 @@ func (m *Manager) Snapshot() []Row {
 	now := time.Now()
 	for _, e := range m.entries {
 		if isActive(e, now) {
+			rows = append(rows, m.snapshotRow(e))
+		}
+	}
+	for e := range m.ephemeral {
+		if e.lease.isAlive() {
 			rows = append(rows, m.snapshotRow(e))
 		}
 	}
@@ -508,7 +664,7 @@ func (m *Manager) snapshotRow(e *entry) Row {
 	return Row{
 		Target: e.target, PortName: e.lease.Destination.PortName, LocalPort: e.lease.LocalPort,
 		Connected: e.lease.Connected, LastAccess: &lastAccess,
-		DefaultPort: m.defaults[defaultTarget(e.target)] == e.target.Port,
+		DefaultPort: e.lease.Destination.DefaultPort == e.target.Port,
 	}
 }
 

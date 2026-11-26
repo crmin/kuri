@@ -68,7 +68,7 @@ func decodeRegistration(raw []byte, account, home string) (Registration, error) 
 		return Registration{}, fmt.Errorf("read kuri LaunchDaemon registration: %w", err)
 	}
 	if account == "" || job.UserName != account || filepath.Clean(job.EnvironmentVariables.Home) != filepath.Clean(home) {
-		return Registration{}, errors.New("The kuri LaunchDaemon belongs to a different macOS account or home directory.")
+		return Registration{}, ErrOtherRegistration
 	}
 	args := job.ProgramArguments
 	http := job.Sockets.HTTP

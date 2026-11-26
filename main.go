@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 	"github.com/crmin/kuri/internal/daemon"
 	"github.com/crmin/kuri/internal/launchd"
 	"github.com/crmin/kuri/internal/menuview"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 func main() {
@@ -71,6 +73,14 @@ func run(args []string) int {
 			err = errors.New("Run kuri start to resume the paused registration.")
 		}
 		if err == nil {
+			var lock io.Closer
+			lock, err = launchd.LockLifecycle(ctx, home)
+			if err == nil {
+				err = prepareRegisteredStart(ctx, app, home)
+				lock.Close()
+			}
+		}
+		if err == nil {
 			err = app.RunForeground(ctx)
 		}
 	case len(args) == 1 && args[0] == "start" && os.Getenv("KURI_LAUNCHD_START") == "1":
@@ -88,6 +98,21 @@ func run(args []string) int {
 		}
 	case len(args) == 1 && args[0] == "__settings_version":
 		fmt.Fprintln(os.Stdout, "1")
+	case len(args) == 1 && args[0] == "__settings_get":
+		err = json.NewEncoder(os.Stdout).Encode(loadSettingsView(ctx, home))
+	case len(args) == 1 && args[0] == "__settings_apply":
+		var edit settings.Edit
+		decoder := json.NewDecoder(io.LimitReader(os.Stdin, 1<<20))
+		decoder.DisallowUnknownFields()
+		if err = decoder.Decode(&edit); err == nil {
+			result := updateSettings(ctx, app, home, edit)
+			view := loadSettingsView(context.WithoutCancel(ctx), home)
+			view.Saved, view.Applied, view.PortError = result.saved, result.applied, result.portError
+			if result.err != nil {
+				view.Error = result.err.Error()
+			}
+			err = json.NewEncoder(os.Stdout).Encode(view)
+		}
 	case len(args) == 1 && args[0] == "stop":
 		var pid int
 		pid, err = stopBackground(ctx, app, home)
@@ -104,9 +129,13 @@ func run(args []string) int {
 		if err == nil {
 			err = cli.WriteState(os.Stdout, state, time.Now())
 		}
-	case len(args) == 1 && args[0] == "__menu_state":
+	case len(args) >= 1 && args[0] == "__menu_state" && (len(args) == 1 || (len(args) == 2 && args[1] == "--history")):
 		var view menuview.State
-		view, err = app.MenuState(ctx)
+		if len(args) == 2 {
+			view, err = app.MenuHistory(ctx)
+		} else {
+			view, err = app.MenuState(ctx)
+		}
 		if err == nil {
 			err = json.NewEncoder(os.Stdout).Encode(view)
 		}

@@ -73,3 +73,63 @@ func TestServerSettingsValidateHostAndPort(t *testing.T) {
 		}
 	}
 }
+
+func TestAutoStartAdmissionUsesLatestCommittedPolicy(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if _, err := store.Ensure(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	locked, permit := make(chan struct{}), make(chan struct{})
+	saved := make(chan error, 1)
+	go func() {
+		_, _, err := store.Update(t.Context(), func(cfg *Config) error {
+			close(locked)
+			<-permit
+			cfg.General.AutoStart = false
+			return nil
+		})
+		saved <- err
+	}()
+	<-locked
+	admitted := make(chan bool, 1)
+	go func() {
+		ok, err := store.AutoStart(t.Context())
+		if err != nil {
+			t.Error(err)
+		}
+		admitted <- ok
+	}()
+	close(permit)
+	if err := <-saved; err != nil {
+		t.Fatal(err)
+	}
+	if <-admitted {
+		t.Fatal("automatic start passed after the Off save acquired the lock")
+	}
+}
+
+func TestKubeconfigChangeResetsContextSelection(t *testing.T) {
+	cfg := Defaults(t.TempDir())
+	cfg.Kubernetes.ExcludedContexts = []string{"disabled"}
+	same := cfg.Kubernetes.ConfigPath
+	if err := (Edit{ConfigPath: &same}).Apply(&cfg); err != nil || len(cfg.Kubernetes.ExcludedContexts) != 1 {
+		t.Fatalf("same file changed context selection: %+v %v", cfg.Kubernetes, err)
+	}
+	next := filepath.Join(t.TempDir(), "other")
+	if err := (Edit{ConfigPath: &next}).Apply(&cfg); err != nil || len(cfg.Kubernetes.ExcludedContexts) != 0 {
+		t.Fatalf("new file did not enable all contexts: %+v %v", cfg.Kubernetes, err)
+	}
+}
+
+func TestPortForwardDraftsPreserveDisabledValues(t *testing.T) {
+	cfg := Defaults(t.TempDir())
+	cfg.PortForward.Minutes = 1.5
+	cfg.PortForward.Trigger = ForwardOpened
+	start, minutes := false, "invalid"
+	if err := (Edit{KeepAlive: &start, Minutes: &minutes}).Apply(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PortForward.KeepAlive || cfg.PortForward.Minutes != 1.5 || cfg.PortForward.Trigger != ForwardOpened {
+		t.Fatalf("disabled policy replaced stored settings: %+v", cfg.PortForward)
+	}
+}

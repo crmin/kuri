@@ -14,8 +14,9 @@ import (
 )
 
 type activationRequest struct {
-	mode string
-	conn *net.UnixConn
+	mode    string
+	conn    *net.UnixConn
+	handoff bool
 }
 
 func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager bool) error {
@@ -26,14 +27,33 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 	// RunAtLoad also leaves the sockets registered for later starts. On
 	// those starts an explicit request already queued by launchd takes priority.
 	store := settings.NewStore(app.home)
+	change, changeErr := app.portChange()
+	port := listenersPort(sockets.HTTP)
+	var suppressed bool
+	if changeErr != nil {
+		return changeErr
+	}
+	if port == change.Port && change.ID != "" {
+		suppressed, changeErr = change.Pending(app.home)
+		if changeErr != nil {
+			return changeErr
+		}
+	}
 	allowAutomatic := func() bool {
+		if suppressed {
+			return false
+		}
 		allowed, err := store.AutoStart(ctx)
 		return err == nil && allowed
 	}
 	eager = eager && !controlRequestQueued(sockets.Control) && allowAutomatic()
 	claims := make(chan activationRequest)
 	chosen := make(chan struct{})
-	go acceptActivation(ctx, sockets.Control, claims, chosen, allowAutomatic)
+	info := reply{State: State{Port: port}}
+	if suppressed {
+		info.PortChange = change.ID
+	}
+	go acceptActivation(ctx, sockets.Control, claims, chosen, allowAutomatic, info)
 
 	var selected activationRequest
 	listeners := sockets.HTTP
@@ -73,11 +93,24 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 	}
 	close(chosen)
 
+	activated := *app
+	activated.activated = true
+	if suppressed {
+		recovery, err := store.Recovery(change.ID)
+		if err != nil {
+			if selected.conn != nil {
+				_ = writeReply(selected.conn, failure(err))
+				_ = selected.conn.Close()
+			}
+			return err
+		}
+		activated.recovery = recovery
+	}
 	if selected.conn == nil {
-		return app.serve(ctx, selected.mode, listeners, nil, nil)
+		return activated.serve(ctx, selected.mode, listeners, nil, nil)
 	}
 	defer selected.conn.Close()
-	return app.serveActivation(ctx, cancel, listeners, selected)
+	return activated.serveActivation(ctx, cancel, listeners, selected)
 }
 
 func controlRequestQueued(listener *net.UnixListener) bool {
@@ -95,7 +128,17 @@ func controlRequestQueued(listener *net.UnixListener) bool {
 	return queued
 }
 
-func acceptActivation(ctx context.Context, listener *net.UnixListener, claims chan<- activationRequest, chosen <-chan struct{}, allowAutomatic func() bool) {
+func listenersPort(listeners []net.Listener) int {
+	if len(listeners) != 2 {
+		return 0
+	}
+	if addr, ok := listeners[0].Addr().(*net.TCPAddr); ok {
+		return addr.Port
+	}
+	return 0
+}
+
+func acceptActivation(ctx context.Context, listener *net.UnixListener, claims chan<- activationRequest, chosen <-chan struct{}, allowAutomatic func() bool, info reply) {
 	for {
 		conn, err := listener.AcceptUnix()
 		if err != nil {
@@ -104,8 +147,16 @@ func acceptActivation(ctx context.Context, listener *net.UnixListener, claims ch
 		go func() {
 			_ = conn.SetDeadline(time.Now().Add(controlTimeout))
 			req, err := readRequest(conn)
+			if err == nil && req.Action == "activation_info" {
+				_ = writeReply(conn, info)
+				_ = conn.Close()
+				return
+			}
 			if err == nil && req.Action != foreground && req.Action != background {
 				err = errors.New("invalid activation mode")
+			}
+			if err == nil && req.PortChange != "" && (req.Action != foreground || req.PortChange != info.PortChange) {
+				err = errors.New("The foreground port change is no longer active.")
 			}
 			if err == nil && req.Automatic && !allowAutomatic() {
 				err = ErrAutoStartDisabled
@@ -116,7 +167,7 @@ func acceptActivation(ctx context.Context, listener *net.UnixListener, claims ch
 				return
 			}
 			select {
-			case claims <- activationRequest{mode: req.Action, conn: conn}:
+			case claims <- activationRequest{mode: req.Action, conn: conn, handoff: req.ForegroundHandoff}:
 				// The server now owns the startup connection.
 			case <-chosen:
 				_ = writeReply(conn, failure(ErrAlreadyRunning))
@@ -133,6 +184,12 @@ func (app *App) serveActivation(ctx context.Context, cancel context.CancelFunc, 
 	var mirror io.Writer
 	if selected.mode == foreground {
 		mirror = conn
+		if selected.handoff {
+			_, owner, _ := peer(conn)
+			if owner > 0 {
+				app.handoff = &foregroundHandoff{conn: conn, owner: owner}
+			}
+		}
 	}
 	_ = conn.SetDeadline(time.Now().Add(startTimeout))
 	acknowledged := false
@@ -145,10 +202,14 @@ func (app *App) serveActivation(ctx context.Context, cancel context.CancelFunc, 
 			return conn.Close()
 		}
 		_ = conn.SetDeadline(time.Time{})
-		go func() {
-			_, _ = io.Copy(io.Discard, conn)
-			cancel()
-		}()
+		if app.handoff != nil {
+			go app.handoff.read(cancel)
+		} else {
+			go func() {
+				_, _ = io.Copy(io.Discard, conn)
+				cancel()
+			}()
+		}
 		return nil
 	})
 	if err != nil && !acknowledged {

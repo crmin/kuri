@@ -46,6 +46,7 @@
 | 다른 프로세스가 요청 포트를 점유 | `Port {requested_port} is already in use by another process. The saved port was restored to {previous_port}.` |
 | 그 외 포트 적용 실패 | `Could not switch to port {requested_port}. The saved port was restored to {previous_port}.` |
 | 이전 포트 재기동 실패 | `The saved port was restored to {previous_port}. The reverse proxy could not restart.` |
+| macOS 등록 복원 실패 | `The saved port was restored to {previous_port}. The macOS registration could not be restored.` |
 | 이전 포트 저장 복원 실패 | `Could not restore the saved port to {previous_port}.` |
 | 그 외 저장 후 적용 실패 | `Settings saved. The reverse proxy could not apply the changes.` / `Retry Applying Settings` |
 | 구버전 데몬 안내 | `Update the installed kuri binary to apply the saved settings.` |
@@ -153,6 +154,6 @@ AppKit의 포인터 이동과 키보드 포커스, 파일 선택 및 창 확인 
 - [x] 현재 메뉴, 서버, CLI와 시작 등록 경로를 확인하고 계획을 작성합니다.
 - [x] 교정한 저장 경로, 즉시 적용과 자동 시작 정책을 독립 검토합니다.
 - [x] 사용자 확인 후 설정 저장소, CLI 및 launchd의 자동 시작 정책을 구현하고 검증합니다.
-- [ ] 라우팅, 포트포워드, 최근 이력, 즉시 적용 및 포트 재시작을 구현하고 검증합니다.
+- [x] 라우팅, 포트포워드, 최근 이력, 즉시 적용 및 포트 재시작을 구현하고 검증합니다.
 - [ ] 메뉴 막대 및 Settings 창을 구현하고 macOS에서 확인합니다.
 - [ ] README, 요구사항 및 CLI help를 갱신하고 각 작업 단위를 커밋합니다.

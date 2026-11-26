@@ -24,18 +24,18 @@ func TestRecentForwards(t *testing.T) {
 			LastAccess: &at, MenuHost: fmt.Sprintf("svc%d.default.dev.kuri.localhost", i),
 		})
 	}
-	got, err := legacyMenuState(state)
+	got, err := legacyMenuState(state, menuview.LegacyRecentLimit)
 	if err != nil || got.Connected != 7 || len(got.Rows) != 5 || got.Rows[0].Label != "svc6.default.dev" || got.Rows[4].Label != "svc2.default.dev" {
 		t.Fatalf("unexpected snapshot: %+v %v", got, err)
 	}
 	later := state.Started.Add(time.Minute)
 	state.Rows[1].LastAccess = &later
-	got, err = legacyMenuState(state)
+	got, err = legacyMenuState(state, menuview.LegacyRecentLimit)
 	if err != nil || got.Rows[0].Label != "svc1.default.dev" || got.Rows[4].Label != "svc3.default.dev" {
 		t.Fatalf("latest request did not move into the list: %+v %v", got, err)
 	}
 	state.Rows[0].LastAccess = nil
-	got, err = legacyMenuState(state)
+	got, err = legacyMenuState(state, menuview.LegacyRecentLimit)
 	if err != nil || got.RecentAvailable || got.Connected != 7 || len(got.Rows) != 0 {
 		t.Fatalf("unexpected legacy snapshot: %+v %v", got, err)
 	}
@@ -54,15 +54,19 @@ func TestMenuStateRequestsBoundedSnapshot(t *testing.T) {
 	var wholeCalls, menuCalls atomic.Int32
 	started := time.Now()
 	state := State{Mode: background, PID: os.Getpid(), Started: started, Token: "only-runtime"}
-	go serveRuntimeControl(listener, state, func() []forward.Row {
-		wholeCalls.Add(1)
-		return make([]forward.Row, 7)
-	}, func() (menuview.State, error) {
-		menuCalls.Add(1)
-		return makeMenuState(state, 7, []forward.Row{
-			{Target: route.Target{Context: "prod", Service: "api", Namespace: "default", Port: 80}, MenuHost: "api.default.prod.kuri.localhost"},
-		}, true)
-	}, func() {}, &stopResult{})
+	go serveRuntimeControl(listener, controlCommands{
+		state: func() State { return state },
+		snapshot: func() []forward.Row {
+			wholeCalls.Add(1)
+			return make([]forward.Row, 7)
+		},
+		menu: func(history bool) (menuview.State, error) {
+			menuCalls.Add(1)
+			return makeMenuState(state, 7, []forward.Row{
+				{Target: route.Target{Context: "prod", Service: "api", Namespace: "default", Port: 80}, MenuHost: "api.default.prod.kuri.localhost"},
+			}, true)
+		},
+	})
 	view, err := app.MenuState(t.Context())
 	if err != nil || view.PID != os.Getpid() || view.Started == nil || !view.Started.Equal(started) || view.Connected != 7 || len(view.Rows) != 1 ||
 		view.Rows[0].URL != "http://api.default.prod.kuri.localhost" || wholeCalls.Load() != 0 || menuCalls.Load() != 1 {

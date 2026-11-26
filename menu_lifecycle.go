@@ -35,6 +35,9 @@ func startBackgroundWithOrigin(ctx context.Context, app *daemon.App, home string
 		}
 		start = app.StartAutomatic
 	}
+	if err := prepareRegisteredStart(ctx, app, home); err != nil {
+		return 0, err
+	}
 	pause, err := launchd.ReadMenuPause()
 	if err != nil {
 		return 0, err

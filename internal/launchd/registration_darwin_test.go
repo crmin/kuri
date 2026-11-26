@@ -3,9 +3,12 @@
 package launchd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestStartupRegistrationStateForOldAndNewPlists(t *testing.T) {
@@ -56,4 +59,110 @@ func TestUpgradePolicyReplacesOnlyManagedExecutable(t *testing.T) {
 	if err != nil || string(changes) != "enable\nbootstrap\n" {
 		t.Fatalf("upgrade changed the loaded registration: %q %v", changes, err)
 	}
+}
+
+func TestLaunchdPortReconcileAndRollback(t *testing.T) {
+	system := newStartupTestSystem(t)
+	binary := system.executable(t, "original")
+	if out, code := system.run(t, "install", binary, true); code != 0 {
+		t.Fatalf("install fixture: %d %s", code, out)
+	}
+	if err := os.WriteFile(filepath.Join(system.root, "boot"), []byte("boot-fix\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(system.root, "home")
+	command := func(port, operation string, privileged bool) (string, int) {
+		return system.runScript(t, privileged, "--configure-port", home, system.account, system.template(), port, operation)
+	}
+	if out, code := command("8080", "first", false); code != 77 {
+		t.Fatalf("port change without approval: %d %s", code, out)
+	}
+	if out, code := command("8080", "first", true); code != 0 || strings.TrimSpace(out) != "loaded" {
+		t.Fatalf("port change: %d %s", code, out)
+	}
+	for _, key := range []string{"Sockets.HTTP.0.SockServiceName", "Sockets.HTTP.1.SockServiceName"} {
+		system.checkPlist(t, key, "8080")
+	}
+	if err := os.WriteFile(filepath.Join(system.root, "fail-bootstrap"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := command("9080", "second", true); code == 0 {
+		t.Fatalf("failed bootstrap reported success: %d %s", code, out)
+	}
+	for _, key := range []string{"Sockets.HTTP.0.SockServiceName", "Sockets.HTTP.1.SockServiceName"} {
+		system.checkPlist(t, key, "8080")
+	}
+	if _, err := os.Stat(filepath.Join(system.root, "loaded")); err != nil {
+		t.Fatal("previous registration not loaded", err)
+	}
+	record, err := os.ReadFile(filepath.Join(system.root, "support", ".port-change"))
+	if err != nil || !strings.HasSuffix(string(record), "\nsecond\n8080\n") {
+		t.Fatalf("rollback did not protect the previous port: %q, %v", record, err)
+	}
+}
+
+func TestSavedPortIsUsedAtNextBoot(t *testing.T) {
+	system := newStartupTestSystem(t)
+	executable := system.executable(t, "startup")
+	port := "18480"
+	if out, code := system.runScript(t, true, "--startup-install", executable, system.account, system.template(), port); code != 0 {
+		t.Fatalf("install with saved port: %d %s", code, out)
+	}
+	system.checkPlist(t, "Sockets.HTTP.0.SockServiceName", port)
+	system.checkPlist(t, "Sockets.HTTP.1.SockServiceName", port)
+	system.checkPlist(t, "RunAtLoad", "true")
+	record := "old-boot\n501\nchangeOnOldBoot\n" + port + "\n"
+	if old, err := parsePortChange(record, "old-boot", 501); err != nil || old.Port != 18480 {
+		t.Fatalf("old boot transition %+v, %v", old, err)
+	}
+	if newBoot, err := parsePortChange(record, "new-boot", 501); err != nil || newBoot.ID != "" {
+		t.Fatalf("previous boot's interruption suppressed the new boot: %+v, %v", newBoot, err)
+	}
+}
+
+func TestStartupInstallHandsOffDirectBackgroundServer(t *testing.T) {
+	system := newStartupTestSystem(t)
+	source := system.executable(t, "staged-app-cli")
+	dir := filepath.Join(system.root, "home", ".kuri", ".startup-handoff-test1")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--startup-install", source, system.account, system.template(), "8080", "--keep-paused", dir}
+	if out, code := system.runScript(t, false, args...); code != 77 {
+		t.Fatalf("unprivileged handoff: %d %s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ready")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("server could be stopped before approval: %v", err)
+	}
+	command := system.command(t, true, args...)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if command.ProcessState == nil {
+			command.Process.Kill()
+			command.Wait()
+		}
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("authorization did not reach the runtime handoff")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(system.plist); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("registration changed before the direct proxy released its port", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "continue"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	system.checkLink(t, source)
+	system.checkPlist(t, "Sockets.HTTP.0.SockServiceName", "8080")
 }

@@ -11,19 +11,35 @@ import (
 
 func Supported() bool { return runtime.GOOS == "darwin" }
 
-func Register(context.Context, string, string) error {
+func Register(context.Context, string, string, ...string) error {
 	return errors.New("build or run kuri with CGO_ENABLED=1 to register its macOS LaunchDaemon")
 }
 
 func InstallStartup(context.Context, io.Writer, io.Writer) error { return startupUnavailable() }
 
+func InstallStartupAt(context.Context, string, io.Writer, io.Writer) error {
+	return startupUnavailable()
+}
+
+func InstallSettingsStartup(context.Context, string, string, io.Writer, io.Writer, func(context.Context) error) error {
+	return startupUnavailable()
+}
+
 func UninstallStartup(context.Context, io.Writer, io.Writer) error { return startupUnavailable() }
+
+func RemoveSocketRegistration(context.Context, io.Writer) error { return startupUnavailable() }
 
 func Registered(context.Context, string) (Registration, error) { return Registration{}, nil }
 
 func (r Registration) SupportsSettings(context.Context) bool { return !r.Present() }
 
 func EnsurePolicySupport(context.Context, string, io.Writer) error { return nil }
+
+func ReadPortChange() (PortChange, error) { return PortChange{}, nil }
+
+func ChangePort(context.Context, string, PortChange, io.Writer) (bool, error) {
+	return false, startupUnavailable()
+}
 
 type noopLock struct{}
 

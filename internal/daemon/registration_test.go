@@ -24,7 +24,7 @@ func TestStartRegistersOnceAndReusesActivation(t *testing.T) {
 			registerCalls, directCalls := 0, 0
 			app.direct = func(context.Context, string) (int, error) {
 				directCalls++
-				return 0, bindError(unix.EACCES)
+				return 0, bindError(unix.EACCES, 80)
 			}
 			result := make(chan error, 1)
 			app.register = func(ctx context.Context) error {
@@ -103,7 +103,7 @@ func TestStartRegistersAfterStaleActivationSocket(t *testing.T) {
 	}
 	registrationCanceled := errors.New("registration canceled")
 	app.direct = func(context.Context, string) (int, error) {
-		return 0, bindError(unix.EPERM)
+		return 0, bindError(unix.EPERM, 80)
 	}
 	app.register = func(context.Context) error { return registrationCanceled }
 	if _, err := app.Start(t.Context()); !errors.Is(err, registrationCanceled) {
@@ -113,7 +113,7 @@ func TestStartRegistersAfterStaleActivationSocket(t *testing.T) {
 
 func TestStartupBindPermissionSurvivesDetachedIPC(t *testing.T) {
 	var message bytes.Buffer
-	if err := writeReply(&message, failure(bindError(unix.EACCES))); err != nil {
+	if err := writeReply(&message, failure(bindError(unix.EACCES, 80))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := decodeReply(json.NewDecoder(&message)); !errors.Is(err, errBindPermission) {
