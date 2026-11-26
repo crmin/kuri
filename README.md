@@ -33,6 +33,12 @@ python -m pip install -r deploy/macos/dmg-requirements.txt
 
 `dist/kuri.dmg`가 생성됩니다. 파일 위치를 지정하려면 `--output /path/to/kuri.dmg`를 사용합니다. 앱에는 Apple Silicon과 Intel용 실행 파일이 들어 있습니다.
 
+DMG의 구성과 Finder 배치를 검사하려면 같은 가상 환경에서 다음 명령을 실행합니다.
+
+```sh
+python deploy/macos/test_dmg.py dist/kuri.dmg
+```
+
 macOS 26.6.2의 Apple Silicon에서 Finder 열기와 드래그 복사를 확인했습니다. Intel용 CLI는 Rosetta에서 실행했습니다.
 
 ## Getting started

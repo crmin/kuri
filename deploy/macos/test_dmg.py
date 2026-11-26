@@ -7,12 +7,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ds_store import DSStore
-from mac_alias import Alias
-
 
 class DiskImageTest(unittest.TestCase):
+    image = None
+
     def test_dmg_contents_and_layout(self):
+        image = self.image
+        if image is None:
+            self.skipTest("No DMG supplied. Run python deploy/macos/test_dmg.py <kuri.dmg>.")
+
+        from ds_store import DSStore
+        from mac_alias import Alias
+
         subprocess.run(["hdiutil", "verify", str(image)], check=True, stdout=subprocess.DEVNULL)
         directory = tempfile.TemporaryDirectory(prefix="kuri-dmg-test-")
         self.addCleanup(directory.cleanup)
@@ -57,5 +63,5 @@ class DiskImageTest(unittest.TestCase):
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit(f"Usage: {sys.argv[0]} <kuri.dmg>")
-    image = Path(sys.argv.pop(1)).resolve(strict=True)
+    DiskImageTest.image = Path(sys.argv.pop(1)).resolve(strict=True)
     unittest.main()
