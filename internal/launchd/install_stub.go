@@ -19,6 +19,12 @@ func InstallStartup(context.Context, io.Writer, io.Writer) error { return startu
 
 func UninstallStartup(context.Context, io.Writer, io.Writer) error { return startupUnavailable() }
 
+func Registered(context.Context, string) (Registration, error) { return Registration{}, nil }
+
+func (r Registration) SupportsSettings(context.Context) bool { return !r.Present() }
+
+func EnsurePolicySupport(context.Context, string, io.Writer) error { return nil }
+
 type noopLock struct{}
 
 func (noopLock) Close() error { return nil }

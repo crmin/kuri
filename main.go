@@ -81,6 +81,13 @@ func run(args []string) int {
 		if err == nil {
 			fmt.Printf("Started kuri (PID %d).\n", pid)
 		}
+	case len(args) == 1 && args[0] == "__auto_start":
+		_, err = startBackgroundWithOrigin(ctx, app, home, true)
+		if errors.Is(err, daemon.ErrAutoStartDisabled) {
+			err = nil
+		}
+	case len(args) == 1 && args[0] == "__settings_version":
+		fmt.Fprintln(os.Stdout, "1")
 	case len(args) == 1 && args[0] == "stop":
 		var pid int
 		pid, err = stopBackground(ctx, app, home)

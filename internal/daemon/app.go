@@ -40,15 +40,19 @@ func New(home, activation string, stdout, stderr io.Writer) *App {
 }
 
 func (app *App) RunForeground(ctx context.Context) error {
-	_, err := app.run(ctx, foreground)
+	_, err := app.run(ctx, foreground, false)
 	return err
 }
 
 func (app *App) Start(ctx context.Context) (int, error) {
-	return app.run(ctx, background)
+	return app.run(ctx, background, false)
 }
 
-func (app *App) run(ctx context.Context, mode string) (int, error) {
+func (app *App) StartAutomatic(ctx context.Context) (int, error) {
+	return app.run(ctx, background, true)
+}
+
+func (app *App) run(ctx context.Context, mode string, automatic bool) (int, error) {
 	state, err := app.State(ctx)
 	if err != nil {
 		return 0, err
@@ -57,7 +61,7 @@ func (app *App) run(ctx context.Context, mode string) (int, error) {
 		return 0, ErrAlreadyRunning
 	}
 	if app.hasActivationSocket() {
-		pid, err := app.activate(ctx, mode)
+		pid, err := app.activate(ctx, mode, automatic)
 		if !errors.Is(err, errActivationUnavailable) {
 			return pid, err
 		}
@@ -70,7 +74,7 @@ func (app *App) run(ctx context.Context, mode string) (int, error) {
 	if err := app.register(ctx); err != nil {
 		return 0, err
 	}
-	return app.activate(ctx, mode)
+	return app.activate(ctx, mode, automatic)
 }
 
 func (app *App) startDirect(ctx context.Context, mode string) (int, error) {
@@ -90,7 +94,7 @@ func (app *App) hasActivationSocket() bool {
 		int(info.Sys().(*syscall.Stat_t).Uid) == os.Geteuid() && info.Mode().Perm()&0077 == 0
 }
 
-func (app *App) activate(ctx context.Context, mode string) (int, error) {
+func (app *App) activate(ctx context.Context, mode string, automatic bool) (int, error) {
 	startCtx, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
 	// An inherited socket's peer credentials can identify launchd, which
@@ -109,7 +113,7 @@ func (app *App) activate(ctx context.Context, mode string) (int, error) {
 	}
 
 	unblock := context.AfterFunc(startCtx, func() { _ = conn.SetDeadline(time.Now()) })
-	if err := sendRequest(conn, mode); err != nil {
+	if err := json.NewEncoder(conn).Encode(request{Version: version, Action: mode, Automatic: automatic}); err != nil {
 		unblock()
 		return 0, err
 	}

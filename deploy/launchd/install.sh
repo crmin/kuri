@@ -243,10 +243,6 @@ startup_command() {
     if [ "$operation" = --startup-uninstall ]; then
         if ! exists "$plist"; then fail "$link start is not registered by kuri."; fi
         [ -f "$plist" ] && protected_by_root "$plist" || fail "Unsafe kuri registration: $plist"
-        if [ "$(plist_value ProgramArguments.0 "$plist")" != "$link" ] ||
-            [ "$(plist_value ProgramArguments.1 "$plist")" != start ]; then
-            fail "$link start is not registered by kuri."
-        fi
     fi
     if [ "$operation" = --startup-install ]; then
         [ "$binary" != "$link" ] || fail 'Run kuri install from the directory containing the original binary.'
@@ -272,7 +268,7 @@ startup_command() {
     fi
 
     if [ "$operation" = --startup-uninstall ]; then
-        [ "$registered" = startup ] || fail "$link start is not registered by kuri."
+        [ "$registered" = startup ] || [ "$registered" = eager ] || fail "$link start is not registered by kuri."
         require_admin
         plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
         if [ -n "$loaded_job" ]; then
@@ -280,7 +276,7 @@ startup_command() {
             /bin/launchctl bootout "system/$label"
         fi
         /bin/mv -fh "$plist" "$plist_stage/original.plist"
-        change_link remove
+        if [ "$registered" = startup ]; then change_link remove; fi
         if exists "$pause_file"; then /bin/rm -f "$pause_file"; fi
         printf 'Uninstalled kuri startup and removed %s.\n' "$link"
         return
@@ -492,7 +488,36 @@ write_menu_pause() {
     record=
 }
 
+upgrade_policy_command() {
+    binary=$2
+    account=$3
+    requested_home=$4
+    template=$5
+    lock_installation
+    staging=$(/usr/bin/mktemp -d /private/var/tmp/kuri-upgrade.XXXXXX)
+    replacement=
+    trap '/bin/rm -rf "$staging"; if [ -n "$replacement" ]; then /bin/rm -f "$replacement"; fi' EXIT
+    trap 'exit 130' HUP INT TERM
+    verify_registration
+    [ "$home" = "$requested_home" ] || fail 'The kuri LaunchDaemon uses a different home directory.'
+    [ "$registered" = legacy ] || [ "$registered" = eager ] || fail 'The kuri binary is not managed by this installer.'
+    [ -f "$program" ] && protected_by_root "$program" || fail 'Unsafe kuri executable.'
+    case "$binary" in /*) ;; *) fail 'Specify an absolute kuri executable path.' ;; esac
+    require_admin
+    replacement=$(/usr/bin/mktemp "$directory/.kuri-policy.XXXXXX")
+    /usr/bin/sudo -n -u "$account" -- /bin/cat "$binary" > "$staging/kuri"
+    [ -s "$staging/kuri" ] || fail 'The replacement kuri executable is empty.'
+    /usr/bin/install -o root -g wheel -m 0755 "$staging/kuri" "$replacement"
+    /bin/mv -fh "$replacement" "$program"
+    replacement=
+}
+
 case "${1:-}" in
+    --upgrade-policy)
+        [ "$#" -eq 5 ] || fail 'Invalid kuri policy update request.'
+        upgrade_policy_command "$@"
+        exit 0
+        ;;
     --menu-pause|--menu-resume|--menu-finish-resume|--menu-rollback)
         [ "$#" -eq 6 ] || fail 'Invalid kuri menu registration request.'
         menu_registration_command "$@"

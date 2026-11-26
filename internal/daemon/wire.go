@@ -26,6 +26,7 @@ const (
 var (
 	ErrNoBackground          = errors.New("No background kuri process is running.")
 	ErrAlreadyRunning        = errors.New("kuri is already running.")
+	ErrAutoStartDisabled     = errors.New("Automatic proxy startup is disabled.")
 	ErrIncompatible          = errors.New("Incompatible kuri control protocol. Update the installed kuri binary.")
 	errNoServer              = errors.New("kuri is not running")
 	errBindPermission        = errors.New("permission denied on loopback port 80")
@@ -41,10 +42,11 @@ type State struct {
 }
 
 type request struct {
-	Version int    `json:"version"`
-	Action  string `json:"action"`
-	Token   string `json:"token,omitempty"`
-	Menu    bool   `json:"menu,omitempty"`
+	Version   int    `json:"version"`
+	Action    string `json:"action"`
+	Token     string `json:"token,omitempty"`
+	Menu      bool   `json:"menu,omitempty"`
+	Automatic bool   `json:"automatic,omitempty"`
 }
 
 type reply struct {
@@ -68,6 +70,8 @@ func failure(err error) reply {
 		return reply{Code: "not_running", Error: err.Error()}
 	case errors.Is(err, ErrAlreadyRunning):
 		return reply{Code: "already_running", Error: err.Error()}
+	case errors.Is(err, ErrAutoStartDisabled):
+		return reply{Code: "auto_start_disabled", Error: err.Error()}
 	case errors.Is(err, ErrIncompatible):
 		return reply{Code: "incompatible", Error: err.Error()}
 	case errors.Is(err, errBindPermission):
@@ -98,6 +102,8 @@ func decodeControlReply(decoder *json.Decoder) (reply, error) {
 		return reply{}, ErrNoBackground
 	case "already_running":
 		return reply{}, ErrAlreadyRunning
+	case "auto_start_disabled":
+		return reply{}, ErrAutoStartDisabled
 	case "incompatible":
 		return reply{}, ErrIncompatible
 	case "bind_permission":

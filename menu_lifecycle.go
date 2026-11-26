@@ -11,20 +11,36 @@ import (
 
 	"github.com/crmin/kuri/internal/daemon"
 	"github.com/crmin/kuri/internal/launchd"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 func startBackground(ctx context.Context, app *daemon.App, home string) (int, error) {
+	return startBackgroundWithOrigin(ctx, app, home, false)
+}
+
+func startBackgroundWithOrigin(ctx context.Context, app *daemon.App, home string, automatic bool) (int, error) {
 	lock, err := launchd.LockLifecycle(ctx, home)
 	if err != nil {
 		return 0, err
 	}
 	defer lock.Close()
+	start := app.Start
+	if automatic {
+		allowed, err := settings.NewStore(home).AutoStart(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if !allowed {
+			return 0, daemon.ErrAutoStartDisabled
+		}
+		start = app.StartAutomatic
+	}
 	pause, err := launchd.ReadMenuPause()
 	if err != nil {
 		return 0, err
 	}
 	if pause.Phase == "" {
-		return app.Start(ctx)
+		return start(ctx)
 	}
 	operation := rand.Text()
 	if pause.Phase == "resuming" && pause.Operation != "" {
@@ -35,7 +51,7 @@ func startBackground(ctx context.Context, app *daemon.App, home string) (int, er
 		begin: func(ctx context.Context) error {
 			return launchd.ChangeMenuRegistration(ctx, "resume", home, operation, pause.Operation, os.Stderr)
 		},
-		start: func(ctx context.Context) (int, error) { return startResumedServer(ctx, app) },
+		start: func(ctx context.Context) (int, error) { return startResumedServer(ctx, app, start) },
 		finish: func(ctx context.Context) error {
 			return launchd.ChangeMenuRegistration(ctx, "finish-resume", home, operation, "", os.Stderr)
 		},
@@ -45,8 +61,8 @@ func startBackground(ctx context.Context, app *daemon.App, home string) (int, er
 	})
 }
 
-func startResumedServer(ctx context.Context, app *daemon.App) (int, error) {
-	pid, err := app.Start(ctx)
+func startResumedServer(ctx context.Context, app *daemon.App, start func(context.Context) (int, error)) (int, error) {
+	pid, err := start(ctx)
 	if errors.Is(err, daemon.ErrAlreadyRunning) {
 		state, stateErr := app.State(ctx)
 		if stateErr == nil && state.PID > 0 && state.Mode == "background" {

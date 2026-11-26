@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/launchd"
+	"github.com/crmin/kuri/internal/settings"
 	"golang.org/x/sys/unix"
 )
 
@@ -24,10 +25,15 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 
 	// RunAtLoad also leaves the sockets registered for later starts. On
 	// those starts an explicit request already queued by launchd takes priority.
-	eager = eager && !controlRequestQueued(sockets.Control)
+	store := settings.NewStore(app.home)
+	allowAutomatic := func() bool {
+		allowed, err := store.AutoStart(ctx)
+		return err == nil && allowed
+	}
+	eager = eager && !controlRequestQueued(sockets.Control) && allowAutomatic()
 	claims := make(chan activationRequest)
 	chosen := make(chan struct{})
-	go acceptActivation(ctx, sockets.Control, claims, chosen)
+	go acceptActivation(ctx, sockets.Control, claims, chosen, allowAutomatic)
 
 	var selected activationRequest
 	listeners := sockets.HTTP
@@ -35,13 +41,28 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 		httpConnected := make(chan struct{}, 1)
 		listeners = make([]net.Listener, 0, len(sockets.HTTP))
 		for _, listener := range sockets.HTTP {
-			first := prepareFirstConnection(listener, httpConnected)
-			defer first.Close()
+			first := prepareFirstConnection(listener, httpConnected, func() bool {
+				select {
+				case <-chosen:
+					return true
+				default:
+					return allowAutomatic()
+				}
+			})
 			listeners = append(listeners, first)
 		}
+		defer func() {
+			cancel()
+			for _, listener := range listeners {
+				_ = listener.Close()
+			}
+		}()
+		idle := time.NewTimer(controlTimeout)
+		defer idle.Stop()
 		select {
 		case <-ctx.Done():
-			close(chosen)
+			return nil
+		case <-idle.C:
 			return nil
 		case <-httpConnected:
 			selected.mode = background
@@ -74,7 +95,7 @@ func controlRequestQueued(listener *net.UnixListener) bool {
 	return queued
 }
 
-func acceptActivation(ctx context.Context, listener *net.UnixListener, claims chan<- activationRequest, chosen <-chan struct{}) {
+func acceptActivation(ctx context.Context, listener *net.UnixListener, claims chan<- activationRequest, chosen <-chan struct{}, allowAutomatic func() bool) {
 	for {
 		conn, err := listener.AcceptUnix()
 		if err != nil {
@@ -85,6 +106,9 @@ func acceptActivation(ctx context.Context, listener *net.UnixListener, claims ch
 			req, err := readRequest(conn)
 			if err == nil && req.Action != foreground && req.Action != background {
 				err = errors.New("invalid activation mode")
+			}
+			if err == nil && req.Automatic && !allowAutomatic() {
+				err = ErrAutoStartDisabled
 			}
 			if err != nil {
 				_ = writeReply(conn, failure(err))
@@ -144,16 +168,23 @@ type firstListener struct {
 	once  sync.Once
 }
 
-func prepareFirstConnection(listener net.Listener, connected chan<- struct{}) *firstListener {
+func prepareFirstConnection(listener net.Listener, connected chan<- struct{}, allow func() bool) *firstListener {
 	first := &firstListener{Listener: listener, first: make(chan accepted, 1)}
 	go func() {
-		conn, err := listener.Accept()
-		first.first <- accepted{conn, err}
-		if err == nil {
-			select {
-			case connected <- struct{}{}:
-			default:
+		for {
+			conn, err := listener.Accept()
+			if err == nil && !allow() {
+				_ = conn.Close()
+				continue
 			}
+			first.first <- accepted{conn, err}
+			if err == nil {
+				select {
+				case connected <- struct{}{}:
+				default:
+				}
+			}
+			return
 		}
 	}()
 	return first
