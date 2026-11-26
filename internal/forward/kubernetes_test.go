@@ -1,6 +1,9 @@
 package forward
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -103,5 +106,41 @@ func TestExecConfigIsIsolatedAcrossContexts(t *testing.T) {
 	requests.Wait()
 	if execConfig.Config != nil {
 		t.Fatal("client construction modified the shared kubeconfig")
+	}
+}
+
+func TestPortForwardFailureUsesSafeAPIReasons(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"forbidden", http.StatusForbidden, "forbidden (HTTP 403)"},
+		{"unauthorized", http.StatusUnauthorized, "authentication failed (HTTP 401)"},
+		{"no upgrade", http.StatusOK, "protocol upgrade failed (HTTP 200)"},
+		{"API connection", 0, "API connection for port forwarding failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte("sensitive response"))
+			}))
+			defer server.Close()
+			if tc.status == 0 {
+				server.Close()
+			}
+			kube := &Kubernetes{
+				config: &clientconfig.Config{
+					Clusters: map[string]*clientconfig.Cluster{"test": {Server: server.URL}},
+					Contexts: map[string]*clientconfig.Context{"dev": {Cluster: "test"}},
+				},
+				loader: &clientcmd.ClientConfigLoadingRules{},
+			}
+			dest := stubDestination(request("test-service").Target, "test-pod")
+			_, err := kube.Open(t.Context(), dest, 30001)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "sensitive response") {
+				t.Fatalf("unexpected failure: %v", err)
+			}
+		})
 	}
 }

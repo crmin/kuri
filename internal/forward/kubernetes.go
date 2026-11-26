@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -229,6 +230,38 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 	return f(request)
 }
 
+// Classify errors before ForwardPorts flattens them into strings. Never
+// include the upstream response body, credentials, or full request URL.
+func forwardFailure(response *http.Response, err error) error {
+	if response != nil {
+		switch response.StatusCode {
+		case http.StatusSwitchingProtocols:
+			return nil
+		case http.StatusForbidden:
+			return errors.New("Kubernetes pod port forwarding was forbidden (HTTP 403)")
+		case http.StatusUnauthorized:
+			return errors.New("Kubernetes pod port forwarding authentication failed (HTTP 401)")
+		default:
+			return fmt.Errorf("Kubernetes port forward protocol upgrade failed (HTTP %d)", response.StatusCode)
+		}
+	}
+	var upgrade *streamhttp.UpgradeFailureError
+	if errors.As(err, &upgrade) {
+		if apierrors.IsForbidden(upgrade.Cause) {
+			return errors.New("Kubernetes pod port forwarding was forbidden (HTTP 403)")
+		}
+		if apierrors.IsUnauthorized(upgrade.Cause) {
+			return errors.New("Kubernetes pod port forwarding authentication failed (HTTP 401)")
+		}
+		return errors.New("Kubernetes port forward protocol upgrade failed")
+	}
+	var network net.Error
+	if errors.As(err, &network) || errors.Is(err, io.EOF) {
+		return errors.New("Kubernetes API connection for port forwarding failed")
+	}
+	return nil
+}
+
 func (k *Kubernetes) Open(ctx context.Context, dest Destination, port int) (Tunnel, error) {
 	client, baseConfig, err := k.client(dest.Context)
 	if err != nil {
@@ -240,9 +273,12 @@ func (k *Kubernetes) Open(ctx context.Context, dest Destination, port int) (Tunn
 	// The readiness context bounds the handshake. Once ready, the tunnel has
 	// its own lifetime so a successful upgrade survives that context.
 	lifetime, stop := context.WithCancel(logr.NewContext(context.WithoutCancel(ctx), logr.Discard()))
+	var failure error
 	config.Wrap(func(next http.RoundTripper) http.RoundTripper {
 		return roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			return next.RoundTrip(request.WithContext(lifetime))
+			response, err := next.RoundTrip(request.WithContext(lifetime))
+			failure = forwardFailure(response, err)
+			return response, err
 		})
 	})
 	rt, upgrader, err := spdy.RoundTripperFor(&config)
@@ -286,6 +322,9 @@ func (k *Kubernetes) Open(ctx context.Context, dest Destination, port int) (Tunn
 		}
 		if forwardErr != nil && listenErrors.Len() > 0 {
 			return Tunnel{}, fmt.Errorf("bind local forwarding port %d: %s", port, strings.TrimSpace(listenErrors.String()))
+		}
+		if failure != nil {
+			return Tunnel{}, failure
 		}
 		return Tunnel{}, fmt.Errorf("Kubernetes port forward to pod %q closed before readiness", dest.Pod)
 	case <-ready:
