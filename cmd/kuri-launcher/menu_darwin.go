@@ -56,7 +56,6 @@ type menuController struct {
 	generation                                              uint64
 	actionError, stateError                                 string
 	lastServer                                              menuview.State
-	startUncertain                                          bool
 	queryCancel                                             context.CancelFunc
 	queryDone                                               chan struct{}
 	pollCancel                                              context.CancelFunc
@@ -188,11 +187,8 @@ func (m *menuController) act(action int, initial bool) {
 		return
 	}
 	if action == quitAction {
-		if m.startUncertain && !m.busy && (!m.known || m.state.PID == 0) {
-			m.actionError = "The previous start did not finish. Confirm server state or try Start before quitting."
-			m.emitLocked()
-			return
-		}
+		// The prior command is reaped before Quit runs. The CLI reconciles
+		// live process and registration state under the lifecycle locks.
 		m.quitPending = true
 		if m.busy {
 			m.emitLocked()
@@ -237,7 +233,9 @@ func (m *menuController) runAction(action int, known menuview.State) {
 		if known.PID > 0 && known.Started != nil {
 			args = append(args, strconv.Itoa(known.PID), known.Started.Format(time.RFC3339Nano))
 		}
-		result = m.runner.run(ctx, 4*time.Minute, 20*time.Second, args...)
+		// Quit can include a regular Stop, administrator approval, and a
+		// separate wait for a process captured just before bootout.
+		result = m.runner.run(ctx, 5*time.Minute, 20*time.Second, args...)
 	}
 	if action == quitAction && result.err == nil {
 		m.mu.Lock()
@@ -261,13 +259,10 @@ func (m *menuController) runAction(action int, known menuview.State) {
 		m.lastServer = menuview.State{}
 	}
 	m.setStateLocked(state, err)
-	if action == startAction {
-		m.startUncertain = result.timedOut || (result.err != nil && err != nil)
-	}
 	if result.err != nil {
 		m.actionError = result.diagnostic
 	}
-	if action == quitAction || m.startUncertain {
+	if action == quitAction {
 		m.quitPending = false
 	}
 	if m.quitPending {

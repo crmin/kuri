@@ -28,7 +28,7 @@ exit 23
 		t.Fatal(err)
 	}
 	runner := testCommandRunner(t, dir, fixture)
-	result := runner.run(t.Context(), time.Second, time.Second, "start")
+	result := runner.run(t.Context(), 10*time.Second, time.Second, "start")
 	var exit *exec.ExitError
 	if !errors.As(result.err, &exit) || exit.ExitCode() != 23 {
 		t.Fatalf("launcher result: %+v", result)
@@ -36,6 +36,14 @@ exit 23
 	want := strings.Join([]string{"1", "start", "unset", dir + ":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", ""}, "\n")
 	if string(result.stdout) != want {
 		t.Fatalf("invocation = %q, want %q", result.stdout, want)
+	}
+}
+
+func TestCommandRunnerReportsDeadline(t *testing.T) {
+	runner := testCommandRunner(t, t.TempDir(), "#!/bin/sh\nexec /bin/sleep 30\n")
+	result := runner.run(t.Context(), 100*time.Millisecond, time.Second, "start")
+	if !result.timedOut || result.err == nil {
+		t.Fatalf("launcher result: %+v", result)
 	}
 }
 
@@ -120,16 +128,47 @@ func TestQuitWaitsForPendingStart(t *testing.T) {
 	}
 }
 
+func TestQuitAfterStartTimeout(t *testing.T) {
+	runner := &menuFixture{calls: make(chan []string, 4), resume: make(chan struct{}),
+		stateValue:  menuview.State{Mode: "stopped"},
+		startResult: commandResult{err: context.DeadlineExceeded, timedOut: true, diagnostic: "Start timed out."}}
+	close(runner.resume)
+	terminated := make(chan struct{})
+	views := make(chan menuPresentation, 8)
+	controller := &menuController{runner: runner, render: func(view menuPresentation) { views <- view }, terminate: func() { close(terminated) }}
+	controller.act(startAction, true)
+	waitForMenu(t, views, func(view menuPresentation) bool { return !view.Busy && view.Known })
+	if args := <-runner.calls; len(args) != 1 || args[0] != "start" {
+		t.Fatal(args)
+	}
+	controller.act(quitAction, false)
+	select {
+	case args := <-runner.calls:
+		if len(args) != 1 || args[0] != "__menu_quit" {
+			t.Fatal(args)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Quit did not reconcile the timed-out Start")
+	}
+	select {
+	case <-terminated:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the app did not quit")
+	}
+}
+
 type menuFixture struct {
-	calls      chan []string
-	resume     chan struct{}
-	stateValue menuview.State
+	calls       chan []string
+	resume      chan struct{}
+	stateValue  menuview.State
+	startResult commandResult
 }
 
 func (f *menuFixture) run(ctx context.Context, _, _ time.Duration, args ...string) commandResult {
 	f.calls <- args
 	if args[0] == "start" {
 		<-f.resume
+		return f.startResult
 	}
 	return commandResult{}
 }

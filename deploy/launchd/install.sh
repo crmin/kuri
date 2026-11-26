@@ -263,7 +263,8 @@ startup_command() {
     verify_registration
     if [ "$operation" = --startup-install ]; then
         read_menu_pause
-        [ -z "$pause_stage" ] || fail 'Run kuri start to resume the paused registration before installing.'
+        [ -z "$pause_stage" ] || [ "$pause_stage" = completed ] ||
+            fail 'Run kuri start to resume the paused registration before installing.'
     fi
     trusted_path "$bin_directory" || fail "Unsafe kuri binary directory: $bin_directory"
     if exists "$link" && [ ! -L "$link" ] && [ ! -f "$link" ]; then
@@ -327,26 +328,87 @@ startup_command() {
 }
 
 read_menu_pause() {
-    pause_stage=
+    pause_stage= saved_operation= saved_pid= saved_birth=
     if ! exists "$pause_file"; then return; fi
     [ -f "$pause_file" ] && protected_by_root "$pause_file" || fail 'Unsafe kuri pause record.'
     boot_session=$(/usr/sbin/sysctl -n kern.bootsessionuuid) || fail 'Could not identify the current boot session.'
     [ -n "$boot_session" ] || fail 'Could not identify the current boot session.'
     {
-        IFS= read -r saved_boot && IFS= read -r saved_uid && IFS= read -r saved_digest && IFS= read -r saved_stage
-    } < "$pause_file" || fail 'Invalid kuri pause record.'
-    if [ "$saved_boot" != "$boot_session" ]; then return; fi
-    pause_stage=$saved_stage
+        IFS= read -r saved_boot && IFS= read -r saved_uid && IFS= read -r saved_digest && IFS= read -r saved_stage ||
+            fail 'Invalid kuri pause record.'
+        # The earlier four-line records remain valid for the current boot.
+        IFS= read -r saved_operation || :
+        IFS= read -r saved_pid || :
+        IFS= read -r saved_birth || :
+    } < "$pause_file"
+    if [ "$saved_boot" = "$boot_session" ]; then pause_stage=$saved_stage; fi
+}
+
+menu_process_birth() {
+    if process_birth=$(LC_ALL=C TZ=UTC /bin/ps -p "$1" -o lstart= 2>"$staging/ps-error"); then
+        [ -n "$process_birth" ] || fail 'Could not identify the kuri LaunchDaemon process.'
+    elif [ "$?" -eq 1 ] && [ ! -s "$staging/ps-error" ]; then
+        process_birth=
+    else
+        fail 'Could not observe the kuri LaunchDaemon process.'
+    fi
+}
+
+unload_menu_job() {
+    if [ -n "$loaded_job" ]; then
+        late_pid=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p')
+        if [ -n "$late_pid" ]; then
+            menu_process_birth "$late_pid"
+            if [ -n "$process_birth" ]; then
+                if [ -n "$saved_pid" ] && [ "$saved_pid" != "$late_pid" ]; then
+                    wait_menu_process
+                fi
+                saved_pid=$late_pid
+                saved_birth=$process_birth
+            fi
+        fi
+        # Persist the observation before bootout closes the job's sockets.
+        write_menu_pause pausing
+        /bin/launchctl bootout "system/$label"
+    fi
+    read_loaded_job
+    [ -z "$loaded_job" ] || fail 'The kuri LaunchDaemon is still loaded.'
+    clear_activation
+    wait_menu_process
+    write_menu_pause paused
+}
+
+wait_menu_process() {
+    if [ -z "$saved_pid" ]; then return; fi
+    case "$saved_pid" in *[!0-9]*|0) fail 'Invalid kuri pause process ID.' ;; esac
+    [ -n "$saved_birth" ] || fail 'Invalid kuri pause process identity.'
+    attempts=40
+    while [ "$attempts" -gt 0 ]; do
+        menu_process_birth "$saved_pid"
+        if [ "$process_birth" != "$saved_birth" ]; then
+            saved_pid= saved_birth=
+            return
+        fi
+        /bin/sleep 1
+        attempts=$(( attempts - 1 ))
+    done
+    fail "The kuri LaunchDaemon process $saved_pid has not exited. Try Quit again."
 }
 
 menu_registration_command() {
     action=$1
+    requested_home=$2
     account=$3
     template=$4
-    if ! exists "$plist"; then
+    operation=$5
+    expected_operation=$6
+
+    # An unregistered direct server has no launchd sockets. If an installer has
+    # reached the installation directory, wait for its transaction first.
+    if ! exists "$directory" && ! exists "$plist"; then
         read_loaded_job
         [ -z "$loaded_job" ] || fail 'The loaded kuri job has no installed registration.'
-        if [ "$action" = --menu-pause ] && ! exists "$pause_file"; then return; fi
+        case "$action" in --menu-pause|--menu-rollback) return ;; esac
         fail 'The kuri registration is missing.'
     fi
     lock_installation
@@ -355,59 +417,69 @@ menu_registration_command() {
     trap '/bin/rm -rf "$staging"; if [ -n "$record" ]; then /bin/rm -f "$record"; fi' EXIT
     trap 'exit 130' HUP INT TERM
     verify_registration
-    [ "$registered" != none ] || fail 'The kuri registration is missing.'
+    if [ "$registered" = none ]; then
+        if [ "$action" = --menu-pause ] && ! exists "$pause_file"; then return; fi
+        if [ "$action" = --menu-rollback ] && ! exists "$pause_file"; then return; fi
+        fail 'The kuri registration is missing.'
+    fi
+    case "$requested_home" in /*) ;; *) fail 'The requesting kuri home must be an absolute path.' ;; esac
+    request_directory=$(/bin/realpath "$requested_home") || fail 'Could not resolve the requesting kuri home directory.'
+    registered_directory=$(/bin/realpath "$home") || fail 'Could not resolve the registered kuri home directory.'
+    [ "$request_directory" = "$registered_directory" ] ||
+        fail 'The kuri LaunchDaemon uses a different home directory.'
     read_menu_pause
     digest=$(/usr/bin/shasum -a 256 < "$plist" | /usr/bin/awk '{print $1}')
     [ -n "$digest" ] || fail 'Could not identify the kuri registration.'
     if [ -n "$pause_stage" ]; then
         [ "$saved_uid" = "$uid" ] && [ "$saved_digest" = "$digest" ] || fail 'The paused kuri registration has changed.'
-        case "$pause_stage" in pausing|paused|resuming) ;; *) fail 'Invalid kuri pause phase.' ;; esac
+        case "$pause_stage" in pausing|paused|resuming|completed) ;; *) fail 'Invalid kuri pause phase.' ;; esac
+    else
+        saved_operation= saved_pid= saved_birth=
     fi
-    if [ "$action" = --menu-pause ] && [ "$pause_stage" = paused ] && [ -z "$loaded_job" ] && ! exists "$activation"; then
-        return
-    fi
+    case "$operation" in ''|*[!A-Za-z0-9]*) fail 'Invalid kuri menu operation.' ;; esac
+
+    case "$action" in
+        --menu-resume)
+            [ -n "$pause_stage" ] && [ "$pause_stage" != completed ] && [ "$saved_operation" = "$expected_operation" ] ||
+                fail 'The kuri pause changed before Start. Try again.'
+            [ -z "$saved_pid" ] || fail 'Finish Quit before restarting kuri.'
+            if [ -n "$loaded_job" ] && { [ "$pause_stage" != resuming ] || [ "$saved_operation" != "$operation" ]; }; then
+                fail 'The paused kuri LaunchDaemon was loaded externally. Quit again before starting.'
+            fi
+            ;;
+        --menu-finish-resume)
+            [ "$pause_stage" = resuming ] && [ "$saved_operation" = "$operation" ] &&
+                [ -n "$loaded_job" ] || fail 'kuri resume has not completed.'
+            ;;
+        --menu-rollback)
+            [ "$saved_operation" = "$operation" ] || return 0
+            case "$pause_stage" in resuming|pausing|completed) ;; *) return ;; esac
+            ;;
+    esac
+
     require_admin
     boot_session=$(/usr/sbin/sysctl -n kern.bootsessionuuid) || fail 'Could not identify the current boot session.'
     [ -n "$boot_session" ] || fail 'Could not identify the current boot session.'
-
     case "$action" in
-        --menu-pause)
+        --menu-pause|--menu-rollback)
             write_menu_pause pausing
-            if [ -n "$loaded_job" ]; then
-                # Capture a process that reactivated between Stop and bootout.
-                late_pid=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p')
-                /bin/launchctl bootout "system/$label"
-                if [ -n "$late_pid" ]; then printf 'pid=%s\n' "$late_pid"; fi
-            fi
-            read_loaded_job
-            [ -z "$loaded_job" ] || fail 'The kuri LaunchDaemon is still loaded.'
-            clear_activation
-            write_menu_pause paused
+            unload_menu_job
             ;;
         --menu-resume)
-            [ -n "$pause_stage" ] || fail 'No current kuri pause record.'
             disabled_jobs=$(/bin/launchctl print-disabled system) || fail 'Could not read launchd policy.'
             if printf '%s\n' "$disabled_jobs" | /usr/bin/grep -Fq -e "\"$label\" => disabled" -e "\"$label\" => true"; then
                 fail 'The kuri LaunchDaemon is disabled by macOS policy.'
             fi
-            if [ -n "$loaded_job" ] && [ "$pause_stage" != resuming ]; then
-                fail 'The paused kuri LaunchDaemon was loaded externally. Quit again before starting.'
-            fi
             write_menu_pause resuming
             if [ -z "$loaded_job" ]; then
                 clear_activation
-                if ! /bin/launchctl bootstrap system "$plist"; then
-                    read_loaded_job
-                    if [ -n "$loaded_job" ]; then /bin/launchctl bootout "system/$label"; fi
-                    clear_activation
-                    write_menu_pause paused
-                    fail 'Could not resume the paused kuri LaunchDaemon.'
-                fi
+                /bin/launchctl bootstrap system "$plist"
             fi
             ;;
         --menu-finish-resume)
-            [ "$pause_stage" = resuming ] && [ -n "$loaded_job" ] || fail 'kuri resume has not completed.'
-            /bin/rm -f "$pause_file"
+            # Keep ownership until the next transition so that a failed reply
+            # after this write can still be reconciled by the original caller.
+            write_menu_pause completed
             ;;
     esac
 }
@@ -415,14 +487,14 @@ menu_registration_command() {
 write_menu_pause() {
     record=$(/usr/bin/mktemp "$directory/.menu-pause.XXXXXX")
     /bin/chmod 0644 "$record"
-    printf '%s\n' "$boot_session" "$uid" "$digest" "$1" > "$record"
+    printf '%s\n' "$boot_session" "$uid" "$digest" "$1" "$operation" "$saved_pid" "$saved_birth" > "$record"
     /bin/mv -fh "$record" "$pause_file"
     record=
 }
 
 case "${1:-}" in
-    --menu-pause|--menu-resume|--menu-finish-resume)
-        [ "$#" -eq 4 ] || fail 'Invalid kuri menu registration request.'
+    --menu-pause|--menu-resume|--menu-finish-resume|--menu-rollback)
+        [ "$#" -eq 6 ] || fail 'Invalid kuri menu registration request.'
         menu_registration_command "$@"
         exit 0
         ;;
@@ -519,7 +591,7 @@ fi
 
 if "$first_run"; then
     read_menu_pause
-    [ -z "$pause_stage" ] || fail 'Run kuri start to resume the paused registration.'
+    [ -z "$pause_stage" ] || [ "$pause_stage" = completed ] || fail 'Run kuri start to resume the paused registration.'
     if [ -f "$plist" ]; then
         owner=$(/usr/bin/plutil -extract UserName raw -o - "$plist")
         if [ "$owner" != "$account" ]; then

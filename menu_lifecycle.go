@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -18,16 +19,33 @@ func startBackground(ctx context.Context, app *daemon.App, home string) (int, er
 		return 0, err
 	}
 	defer lock.Close()
-	paused, err := launchd.MenuPaused()
+	pause, err := launchd.ReadMenuPause()
 	if err != nil {
 		return 0, err
 	}
-	if !paused {
+	if pause.Phase == "" {
 		return app.Start(ctx)
 	}
-	if err := launchd.ResumeMenu(ctx, os.Stderr); err != nil {
-		return 0, err
+	operation := rand.Text()
+	if pause.Phase == "resuming" && pause.Operation != "" {
+		// Continue the recorded transaction rather than claiming another job.
+		operation = pause.Operation
 	}
+	return runMenuResume(ctx, menuResumeSteps{
+		begin: func(ctx context.Context) error {
+			return launchd.ChangeMenuRegistration(ctx, "resume", home, operation, pause.Operation, os.Stderr)
+		},
+		start: func(ctx context.Context) (int, error) { return startResumedServer(ctx, app) },
+		finish: func(ctx context.Context) error {
+			return launchd.ChangeMenuRegistration(ctx, "finish-resume", home, operation, "", os.Stderr)
+		},
+		rollback: func(ctx context.Context) error {
+			return launchd.ChangeMenuRegistration(ctx, "rollback", home, operation, "", os.Stderr)
+		},
+	})
+}
+
+func startResumedServer(ctx context.Context, app *daemon.App) (int, error) {
 	pid, err := app.Start(ctx)
 	if errors.Is(err, daemon.ErrAlreadyRunning) {
 		state, stateErr := app.State(ctx)
@@ -35,16 +53,32 @@ func startBackground(ctx context.Context, app *daemon.App, home string) (int, er
 			pid, err = state.PID, nil
 		}
 	}
-	if err != nil {
-		rollback, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
-		defer cancel()
-		latePID, pauseErr := launchd.PauseMenu(rollback, os.Stderr)
-		if pauseErr == nil {
-			pauseErr = daemon.WaitForLaunchdExit(rollback, latePID)
-		}
-		return 0, errors.Join(err, pauseErr)
+	return pid, err
+}
+
+type menuResumeSteps struct {
+	begin, finish, rollback func(context.Context) error
+	start                   func(context.Context) (int, error)
+}
+
+func runMenuResume(ctx context.Context, steps menuResumeSteps) (int, error) {
+	var pid int
+	err := steps.begin(ctx)
+	if err == nil {
+		pid, err = steps.start(ctx)
 	}
-	return pid, launchd.FinishMenuResume(ctx, os.Stderr)
+	if err == nil {
+		err = steps.finish(ctx)
+	}
+	if err == nil {
+		return pid, nil
+	}
+	recovery, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*time.Minute)
+	defer cancel()
+	if rollbackErr := steps.rollback(recovery); rollbackErr != nil {
+		return 0, errors.Join(err, fmt.Errorf("restore the paused kuri registration: %w", rollbackErr))
+	}
+	return 0, err
 }
 
 func stopBackground(ctx context.Context, app *daemon.App, home string) (int, error) {
@@ -81,12 +115,8 @@ func quitMenu(ctx context.Context, app *daemon.App, home string, args []string) 
 	if err := app.QuitBackground(ctx, pid, started); err != nil {
 		return err
 	}
-	latePID, err := launchd.PauseMenu(ctx, os.Stderr)
-	if err != nil {
+	if err := launchd.ChangeMenuRegistration(ctx, "pause", home, rand.Text(), "", os.Stderr); err != nil {
 		return err
-	}
-	if err := daemon.WaitForLaunchdExit(ctx, latePID); err != nil {
-		return fmt.Errorf("wait for the kuri LaunchDaemon to exit: %w", err)
 	}
 	state, err := app.State(ctx)
 	if err != nil {

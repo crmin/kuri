@@ -70,6 +70,8 @@ CGO_ENABLED=1 go build -o kuri .
 
 To update kuri, run `./kuri install` again from the directory where you built the new binary. If the startup job is already registered, `install` only updates the link. The server uses the new binary the next time it starts. If you move the binary, run the install command again from its new location.
 
+같은 부팅 세션에서 Quit로 자동 시작을 일시 중지했다면 앱을 다시 열거나 새 CLI의 `kuri start`를 실행해 재개합니다. 그다음 `./kuri install`을 실행합니다.
+
 To remove the startup registration, run the following command.
 
 ```sh

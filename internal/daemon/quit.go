@@ -47,20 +47,3 @@ func (app *App) QuitBackground(ctx context.Context, knownPID int, knownStarted t
 	}
 	return err
 }
-
-func WaitForLaunchdExit(ctx context.Context, pid int) error {
-	if pid == 0 || errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
-		return nil
-	}
-	exited, release, err := subscribeExit(pid)
-	if errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer release()
-	wait, cancel := context.WithTimeout(ctx, startTimeout)
-	defer cancel()
-	return exited(wait)
-}

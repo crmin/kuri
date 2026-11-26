@@ -24,10 +24,13 @@ type noopLock struct{}
 func (noopLock) Close() error { return nil }
 
 func LockLifecycle(context.Context, string) (io.Closer, error) { return noopLock{}, nil }
-func MenuPaused() (bool, error)                                { return false, nil }
-func PauseMenu(context.Context, io.Writer) (int, error)        { return 0, nil }
-func ResumeMenu(context.Context, io.Writer) error              { return startupUnavailable() }
-func FinishMenuResume(context.Context, io.Writer) error        { return startupUnavailable() }
+func ReadMenuPause() (MenuPause, error)                        { return MenuPause{}, nil }
+func ChangeMenuRegistration(_ context.Context, action, _, _, _ string, _ io.Writer) error {
+	if action == "pause" {
+		return nil
+	}
+	return startupUnavailable()
+}
 
 func startupUnavailable() error {
 	if runtime.GOOS == "darwin" {
