@@ -282,6 +282,11 @@ func TestQuitPauseUsesBootSession(t *testing.T) {
 	if out, code := s.run(t, "install", path, true); code == 0 || !strings.Contains(out, "kuri start") {
 		t.Fatalf("paused install: %d %s", code, out)
 	}
+	s.flag(t, "disabled")
+	menu("resume", true, 1)
+	if err := os.Remove(filepath.Join(s.root, "disabled")); err != nil {
+		t.Fatal(err)
+	}
 	menu("resume", true, 0)
 	menu("finish-resume", true, 0)
 	menu("pause", true, 0)

@@ -386,6 +386,10 @@ menu_registration_command() {
             ;;
         --menu-resume)
             [ -n "$pause_stage" ] || fail 'No current kuri pause record.'
+            disabled_jobs=$(/bin/launchctl print-disabled system) || fail 'Could not read launchd policy.'
+            if printf '%s\n' "$disabled_jobs" | /usr/bin/grep -Fq -e "\"$label\" => disabled" -e "\"$label\" => true"; then
+                fail 'The kuri LaunchDaemon is disabled by macOS policy.'
+            fi
             if [ -n "$loaded_job" ] && [ "$pause_stage" != resuming ]; then
                 fail 'The paused kuri LaunchDaemon was loaded externally. Quit again before starting.'
             fi
