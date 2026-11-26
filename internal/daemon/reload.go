@@ -18,6 +18,7 @@ import (
 
 type proxyRuntime struct {
 	mu               sync.Mutex
+	applyMu          sync.Mutex
 	closed           bool
 	workers          sync.WaitGroup
 	home             string
@@ -93,24 +94,34 @@ func (r *proxyRuntime) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	handler.ServeHTTP(w, req.WithContext(ctx))
 }
 
-func (r *proxyRuntime) apply(ctx context.Context, fingerprint string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	cfg, err := settings.NewStore(r.home).Read()
+func (r *proxyRuntime) apply(ctx context.Context, fingerprint string, retainPort bool) error {
+	r.applyMu.Lock()
+	defer r.applyMu.Unlock()
+
+	store := settings.NewStore(r.home)
+	cfg, err := store.Read()
 	if err != nil {
 		return err
 	}
 	if cfg.Fingerprint() != fingerprint {
 		return ErrSettingsChanged
 	}
+	r.mu.Lock()
+	previous, original, closed := r.current, r.config, r.closed
+	r.mu.Unlock()
+	if closed {
+		return errors.New("The reverse proxy is shutting down.")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if r.closed {
-		return errors.New("The reverse proxy is shutting down.")
+	if retainPort {
+		cfg.Server.Port = original.Server.Port
 	}
+
 	var listeners []net.Listener
-	if cfg.Server.Port != r.config.Server.Port {
+	defer func() { closeListeners(listeners) }()
+	if cfg.Server.Port != original.Server.Port {
 		if r.replaceListeners == nil {
 			return ErrPortRestartRequired
 		}
@@ -118,36 +129,52 @@ func (r *proxyRuntime) apply(ctx context.Context, fingerprint string) error {
 		if err != nil {
 			return bindError(err, cfg.Server.Port)
 		}
-		defer func() { closeListeners(listeners) }()
 	}
 	var next *proxyBackend
-	if cfg.Kubernetes.ConfigPath != r.config.Kubernetes.ConfigPath {
-		next, err = r.openBackend(cfg, r.current)
+	defer func() {
+		if next != nil {
+			if err := next.close(); err != nil {
+				r.logError(err)
+			}
+		}
+	}()
+	if cfg.Kubernetes.ConfigPath != original.Kubernetes.ConfigPath {
+		next, err = r.openBackend(cfg, previous)
 		if err != nil {
 			return err
 		}
 	}
-	if listeners != nil {
-		if err := r.replaceListeners(listeners); err != nil {
-			if next != nil {
-				err = errors.Join(err, next.close())
-			}
+
+	return store.WithSnapshot(ctx, func(latest settings.Config) error {
+		if latest.Fingerprint() != fingerprint {
+			return ErrSettingsChanged
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		listeners = nil
-	}
-	if next != nil {
-		previous := r.current
-		r.current = next
-		previous.manager.UpdatePolicy(r.config.PortForward, func(string) bool { return false })
-		r.workers.Go(func() {
-			if err := previous.close(); err != nil {
-				r.logError(err)
+		if r.closed {
+			return errors.New("The reverse proxy is shutting down.")
+		}
+		if listeners != nil {
+			if err := r.replaceListeners(listeners); err != nil {
+				return err
 			}
-		})
-	}
-	r.install(cfg)
-	return nil
+			listeners = nil
+		}
+		if next != nil {
+			r.current, next = next, nil
+			previous.manager.UpdatePolicy(original.PortForward, func(string) bool { return false })
+			r.workers.Go(func() {
+				if err := previous.close(); err != nil {
+					r.logError(err)
+				}
+			})
+		}
+		r.install(cfg)
+		return nil
+	})
 }
 
 func (r *proxyRuntime) state(state State) State {

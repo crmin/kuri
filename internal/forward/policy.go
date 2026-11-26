@@ -67,16 +67,22 @@ func (m *Manager) acquireEphemeral(ctx context.Context, req route.Request) (*Lea
 	start, stop := context.WithTimeout(lifetime, startupTimeout)
 	defer stop()
 
+	e := &entry{owner: m, host: req.Host, ephemeral: true}
+	port, _, err := m.reserve(start, e, nil)
+	if err != nil {
+		closeRequest()
+		return nil, nil, err
+	}
 	destinations, err := m.backend.Resolve(start, req.Target, "")
 	if err != nil || len(destinations) == 0 {
+		m.unreserve(e, port)
 		closeRequest()
 		if err == nil {
 			err = errors.New("service has no eligible pod")
 		}
 		return nil, nil, err
 	}
-	e := &entry{owner: m, host: req.Host, ephemeral: true}
-	lease, err := m.open(start, e, destinations, false)
+	lease, err := m.open(start, e, destinations, false, port)
 	if err != nil {
 		closeRequest()
 		return nil, nil, err

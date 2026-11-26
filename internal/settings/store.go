@@ -38,13 +38,30 @@ func (s Store) Ensure(ctx context.Context) (Config, error) {
 
 // AutoStart serializes the admission decision with committed settings updates.
 func (s Store) AutoStart(ctx context.Context) (bool, error) {
+	var allowed bool
+	err := s.WithSnapshot(ctx, func(cfg Config) error {
+		allowed = cfg.General.AutoStart
+		return nil
+	})
+	return allowed, err
+}
+
+// WithSnapshot serializes a short publication step with settings writes.
+// The callback must not wait for a daemon or prepare external resources.
+func (s Store) WithSnapshot(ctx context.Context, publish func(Config) error) error {
 	lock, err := s.lock(ctx)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer lock.Close()
 	cfg, err := s.Read()
-	return err == nil && cfg.General.AutoStart, err
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return publish(cfg)
 }
 
 func (s Store) Update(ctx context.Context, change func(*Config) error) (before, after Config, err error) {

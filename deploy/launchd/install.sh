@@ -264,12 +264,13 @@ await_startup_handoff() {
         : > "$1/ready"
         ticks=0
         while [ "$ticks" -lt 60 ]; do
+            [ ! -f "$1/abort" ] || exit 1
             [ ! -f "$1/continue" ] || exit 0
             /bin/sleep 1
             ticks=$((ticks + 1))
         done
         exit 1
-    ' kuri-startup-handoff "$handoff_directory" || fail 'The running kuri proxy did not release its listener.'
+    ' kuri-startup-handoff "$handoff_directory" || fail 'The kuri settings operation did not complete.'
 }
 
 startup_command() {
@@ -326,6 +327,7 @@ startup_command() {
             [ "$registered" = startup ] || [ "$registered" = eager ] || fail "$link start is not registered by kuri."
         fi
         require_admin
+        await_startup_handoff
         plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
         if [ -n "$loaded_job" ]; then
             bootout_attempted=true

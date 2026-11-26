@@ -431,7 +431,11 @@ func TestRecoveryDelayUsesRandomJitter(t *testing.T) {
 
 func TestConcurrentEphemeralRequestsWaitForPort(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		manager := testManager(stubBackend{})
+		var resolves atomic.Int64
+		manager := testManager(stubBackend{resolve: func(_ context.Context, target route.Target, _ string) ([]Destination, error) {
+			resolves.Add(1)
+			return []Destination{stubDestination(target, "first")}, nil
+		}})
 		defer manager.Close()
 		manager.UpdatePolicy(settings.PortForward{MinPort: 30000, MaxPort: 30000}, nil)
 		first, release, err := manager.AcquireRequest(t.Context(), request("api"))
@@ -450,6 +454,9 @@ func TestConcurrentEphemeralRequestsWaitForPort(t *testing.T) {
 			done <- err
 		}()
 		synctest.Wait()
+		if resolves.Load() != 1 {
+			t.Fatalf("port waiter started Kubernetes resolution: %d calls", resolves.Load())
+		}
 		select {
 		case err := <-done:
 			t.Fatalf("request with no free port did not wait: %v", err)
@@ -465,6 +472,31 @@ func TestConcurrentEphemeralRequestsWaitForPort(t *testing.T) {
 			t.Fatalf("active %d, history %+v", active, history)
 		}
 	})
+}
+
+func TestEphemeralPortReservationReleasedOnLookupFailure(t *testing.T) {
+	var calls atomic.Int64
+	manager := testManager(stubBackend{resolve: func(_ context.Context, target route.Target, _ string) ([]Destination, error) {
+		if calls.Add(1) == 1 {
+			return nil, errors.New("fixture lookup failed")
+		}
+		return []Destination{stubDestination(target, "first")}, nil
+	}})
+	defer manager.Close()
+	manager.UpdatePolicy(settings.PortForward{MinPort: 30000, MaxPort: 30000}, nil)
+	if _, _, err := manager.AcquireRequest(t.Context(), request("api")); err == nil {
+		t.Fatal("lookup unexpectedly succeeded")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	lease, release, err := manager.AcquireRequest(ctx, request("api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if lease.LocalPort != 30000 {
+		t.Fatalf("released port was not reused: %d", lease.LocalPort)
+	}
 }
 
 func TestKeepAliveTimerModes(t *testing.T) {

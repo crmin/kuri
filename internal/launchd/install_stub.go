@@ -27,6 +27,10 @@ func InstallSettingsStartup(context.Context, string, string, io.Writer, io.Write
 
 func UninstallStartup(context.Context, io.Writer, io.Writer) error { return startupUnavailable() }
 
+func UninstallSettingsStartup(context.Context, string, io.Writer, func(context.Context) error) error {
+	return startupUnavailable()
+}
+
 func RemoveSocketRegistration(context.Context, io.Writer) error { return startupUnavailable() }
 
 func Registered(context.Context, string) (Registration, error) { return Registration{}, nil }

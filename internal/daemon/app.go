@@ -300,11 +300,15 @@ func (app *App) State(ctx context.Context) (State, error) {
 	return readState(ctx, conn, pid)
 }
 
-func (app *App) ApplySettings(ctx context.Context, state State, fingerprint string) (State, error) {
+func (app *App) ApplySettings(ctx context.Context, state State, fingerprint string, retainPort bool) (State, error) {
 	if state.ProxyFingerprint == "" {
 		return State{}, ErrIncompatible
 	}
-	return app.sendRuntimeCommand(ctx, state, request{Action: "apply_settings", Fingerprint: fingerprint})
+	action := "apply_settings"
+	if retainPort {
+		action = "apply_settings_retain_port"
+	}
+	return app.sendRuntimeCommand(ctx, state, request{Action: action, Fingerprint: fingerprint})
 }
 
 func (app *App) sendRuntimeCommand(ctx context.Context, state State, req request) (State, error) {

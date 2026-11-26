@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/crmin/kuri/internal/launchd"
@@ -81,4 +82,24 @@ func (app *App) RegisterForPort(ctx context.Context, operation string) error {
 
 func (app *App) EnsurePolicySupport(ctx context.Context) error {
 	return launchd.EnsurePolicySupport(ctx, app.home, app.stderr)
+}
+
+func (app *App) UninstallStartupForReset(ctx context.Context, save func(context.Context) error) error {
+	return launchd.UninstallSettingsStartup(ctx, app.home, app.stderr, save)
+}
+
+// OwnsRegisteredPort confirms the live listener independently of the plist.
+// Inspecting the activation socket does not request a proxy startup.
+func (app *App) OwnsRegisteredPort(ctx context.Context, port int) (bool, error) {
+	if !app.hasActivationSocket() {
+		return false, nil
+	}
+	info, err := app.activationInfo(ctx)
+	if errors.Is(err, os.ErrNotExist) || connectionRefused(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.State.Port == port, nil
 }

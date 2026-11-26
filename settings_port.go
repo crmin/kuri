@@ -32,8 +32,17 @@ func applyPort(ctx context.Context, app settingsServer, home string, state daemo
 	if !registered.Present() || registered.Port == cfg.Server.Port {
 		if !state.Activated {
 			if state.PID == 0 {
-				if err := daemon.ProbePort(cfg.Server.Port); err != nil && !daemon.RequiresRegistration(err) {
-					return change, err
+				var owned bool
+				if registered.Present() {
+					owned, err = app.OwnsRegisteredPort(ctx, cfg.Server.Port)
+					if err != nil {
+						return change, err
+					}
+				}
+				if !owned {
+					if err := daemon.ProbePort(cfg.Server.Port); err != nil && !daemon.RequiresRegistration(err) {
+						return change, err
+					}
 				}
 			}
 			err := applySavedSettings(ctx, app, state, cfg)

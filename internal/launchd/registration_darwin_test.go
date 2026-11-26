@@ -166,3 +166,54 @@ func TestStartupInstallHandsOffDirectBackgroundServer(t *testing.T) {
 	system.checkLink(t, source)
 	system.checkPlist(t, "Sockets.HTTP.0.SockServiceName", "8080")
 }
+
+func TestResetHandoffAbortKeepsStartupRegistration(t *testing.T) {
+	system := newStartupTestSystem(t)
+	binary := system.executable(t, "registered")
+	if out, code := system.run(t, "install", binary, true); code != 0 {
+		t.Fatalf("install fixture: %d %s", code, out)
+	}
+	changesPath := filepath.Join(system.root, "changes")
+	before, err := os.ReadFile(changesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(system.root, "home", ".kuri", ".startup-handoff-reset")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "abort"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, code := system.runScript(t, true, "--startup-uninstall", "", system.account, system.template(), "80", "", dir)
+	if code == 0 {
+		t.Fatalf("uninstall succeeded after settings save aborted: %s", out)
+	}
+	after, err := os.ReadFile(changesPath)
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("aborted reset changed the loaded registration: %q -> %q, %v", before, after, err)
+	}
+	system.checkLink(t, binary)
+	system.checkPlist(t, "RunAtLoad", "true")
+}
+
+func TestResetUpdatesRetainedActivationPort(t *testing.T) {
+	system := newStartupTestSystem(t)
+	home := filepath.Join(system.root, "home")
+	binary := system.executable(t, "socket-only")
+	if out, code := system.runScript(t, true, "--first-run", binary, system.account, home, system.template(), "18880"); code != 0 {
+		t.Fatalf("register socket activation fixture: %d %s", code, out)
+	}
+	if err := os.WriteFile(filepath.Join(system.root, "boot"), []byte("boot-reset\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, code := system.runScript(t, true, "--configure-port", home, system.account, system.template(), "80", "reset")
+	if code != 0 || strings.TrimSpace(out) != "loaded" {
+		t.Fatalf("reset socket activation port: %d %s", code, out)
+	}
+	system.checkPlist(t, "ProgramArguments.1", "__launchd")
+	system.checkPlist(t, "RunAtLoad", "false")
+	for _, key := range []string{"Sockets.HTTP.0.SockServiceName", "Sockets.HTTP.1.SockServiceName"} {
+		system.checkPlist(t, key, "80")
+	}
+}

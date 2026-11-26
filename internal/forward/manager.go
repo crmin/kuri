@@ -311,7 +311,7 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 	defer close(e.finished)
 	defer e.cancel()
 	ctx, cancel := context.WithTimeout(e.ctx, startupTimeout)
-	lease, err := m.open(ctx, e, destinations, false)
+	lease, err := m.open(ctx, e, destinations, false, 0)
 	cancel()
 
 	for err == nil {
@@ -461,7 +461,7 @@ func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
 			}
 			m.mu.Unlock()
 			var lease *Lease
-			lease, err = m.open(attempt, e, destinations, true)
+			lease, err = m.open(attempt, e, destinations, true, 0)
 			if err == nil {
 				stopAttempt()
 				cancel()
@@ -493,14 +493,34 @@ func recoveryDelay() time.Duration {
 	return retryInterval - retryJitter + time.Duration(rand.Int64N(int64(2*retryJitter)+1))
 }
 
-func (m *Manager) open(ctx context.Context, e *entry, destinations []Destination, verify bool) (*Lease, error) {
+func (m *Manager) open(ctx context.Context, e *entry, destinations []Destination, verify bool, reserved int) (*Lease, error) {
+	defer func() {
+		if reserved != 0 {
+			m.unreserve(e, reserved)
+		}
+	}()
+	if reserved != 0 {
+		m.mu.Lock()
+		withinRange := m.containsPortLocked(reserved)
+		m.mu.Unlock()
+		if !withinRange {
+			m.unreserve(e, reserved)
+			reserved = 0
+		}
+	}
 	var last error
 	for _, destination := range destinations {
 		skipped := make(map[int]bool)
 		for ctx.Err() == nil {
-			port, evicted, err := m.reserve(ctx, e, skipped)
-			if err != nil {
-				return nil, err
+			port := reserved
+			reserved = 0
+			var evicted *entry
+			if port == 0 {
+				var err error
+				port, evicted, err = m.reserve(ctx, e, skipped)
+				if err != nil {
+					return nil, err
+				}
 			}
 			if evicted != nil {
 				select {
@@ -548,6 +568,9 @@ func (m *Manager) open(ctx context.Context, e *entry, destinations []Destination
 
 func (m *Manager) reserve(ctx context.Context, e *entry, skipped map[int]bool) (int, *entry, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
 		port, evicted, changed := m.tryReserve(e, skipped)
 		if port != 0 {
 			return port, evicted, nil
@@ -570,8 +593,13 @@ func (m *Manager) tryReserve(e *entry, skipped map[int]bool) (int, *entry, <-cha
 	defer m.ports.mu.Unlock()
 
 	var wait <-chan struct{}
-	for _, offset := range rand.Perm(m.maxPort - m.minPort) {
-		port := m.minPort + offset
+	width := m.maxPort - m.minPort
+	if width <= 0 {
+		return 0, nil, nil
+	}
+	start := rand.IntN(width)
+	for offset := range width {
+		port := m.minPort + (start+offset)%width
 		if skipped[port] {
 			continue
 		}

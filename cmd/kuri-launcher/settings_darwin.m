@@ -341,7 +341,8 @@ static NSString *settingsString(id value) {
             BOOL restoredPort = [key isEqual:@"port"] && portError.length != 0;
             BOOL acceptSaved = (saved && pending[key] && !restoredPort) || (reset && applied) ||
                 ([key isEqual:@"minutes"] && self.keepAlive.state == NSControlStateValueOff);
-            NSString *text = (!pending || acceptSaved) ? self.saved[key] : draft[key] ?: self.saved[key];
+            NSString *text = restoredPort && pending[key] ? pending[key] :
+                (!pending || acceptSaved) ? self.saved[key] : draft[key] ?: self.saved[key];
             self.fields[key].stringValue = text ?: @"";
         }
 

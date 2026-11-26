@@ -39,32 +39,16 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 	}
 	defer lock.Close()
 
-	cfg, err := settings.NewStore(app.home).Read()
-	if err != nil {
-		return err
-	}
-	if port := listenersPort(listeners); port != 0 && port != cfg.Server.Port {
-		return fmt.Errorf("The listener uses port %d. Apply the saved port %d before starting kuri.", port, cfg.Server.Port)
-	}
-	if app.recovery != nil && app.recovery.Server.Port == cfg.Server.Port {
-		general := cfg.General
-		cfg = *app.recovery
-		cfg.General = general
-	}
 	console := accesslog.NewConsole(mirror)
 	logger, err := accesslog.Open(filepath.Join(dir, "access.log"), console)
 	if err != nil {
 		return fmt.Errorf("open access log: %w", err)
 	}
-	runtime, err := newProxyRuntime(app.home, app.detached, cfg, logger, func(err error) { fmt.Fprintln(app.stderr, err) })
+	runtime, control, err := app.prepareRuntime(ctx, listeners, logger)
 	if err != nil {
 		return err
 	}
 	defer runtime.close()
-	control, err := openRuntimeControl(filepath.Join(dir, "ctl"))
-	if err != nil {
-		return err
-	}
 	defer control.Close()
 
 	run, stop := context.WithCancel(ctx)
@@ -104,8 +88,12 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 			state:    func() State { return runtime.state(state) },
 			snapshot: runtime.snapshot,
 			menu:     func(history bool) (menuview.State, error) { return runtime.menu(state, history) },
-			apply:    func(fingerprint string) error { return runtime.apply(run, fingerprint) },
-			stop:     stop, stopped: stopped,
+			apply: func(fingerprint string, retainPort bool) error {
+				applyCtx, cancel := context.WithTimeout(run, startTimeout)
+				defer cancel()
+				return runtime.apply(applyCtx, fingerprint, retainPort)
+			},
+			stop: stop, stopped: stopped,
 		}
 		if app.handoff != nil {
 			commands.preparePortRestart = func(operation string) error { return app.handoff.prepare(run, operation) }
@@ -145,6 +133,48 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 	_ = control.Close()
 	<-controlDone
 	return errors.Join(err, credentialErr, logErr)
+}
+
+// Publish the control socket while holding the settings snapshot lock. A
+// concurrent save either sees this socket after writing or wins the race and
+// makes us rebuild from the newer settings before accepting requests.
+func (app *App) prepareRuntime(ctx context.Context, listeners []net.Listener, logger *accesslog.Writer) (*proxyRuntime, *net.UnixListener, error) {
+	store := settings.NewStore(app.home)
+	for {
+		saved, err := store.Read()
+		if err != nil {
+			return nil, nil, err
+		}
+		if port := listenersPort(listeners); port != 0 && port != saved.Server.Port {
+			return nil, nil, fmt.Errorf("The listener uses port %d. Apply the saved port %d before starting kuri.", port, saved.Server.Port)
+		}
+		cfg := saved
+		if app.recovery != nil && app.recovery.Server.Port == cfg.Server.Port {
+			cfg = *app.recovery
+			cfg.General = saved.General
+		}
+		runtime, err := newProxyRuntime(app.home, app.detached, cfg, logger, func(err error) { fmt.Fprintln(app.stderr, err) })
+		if err != nil {
+			return nil, nil, err
+		}
+		var control *net.UnixListener
+		err = store.WithSnapshot(ctx, func(latest settings.Config) error {
+			if latest.Fingerprint() != saved.Fingerprint() {
+				return ErrSettingsChanged
+			}
+			control, err = openRuntimeControl(filepath.Join(store.Directory(), "ctl"))
+			return err
+		})
+		if err == nil {
+			return runtime, control, nil
+		}
+		if closeErr := runtime.close(); closeErr != nil {
+			return nil, nil, errors.Join(err, closeErr)
+		}
+		if !errors.Is(err, ErrSettingsChanged) {
+			return nil, nil, err
+		}
+	}
 }
 
 func newHTTPServer(ctx context.Context, handler http.Handler) *http.Server {
@@ -237,7 +267,7 @@ type controlCommands struct {
 	state              func() State
 	snapshot           func() []forward.Row
 	menu               func(bool) (menuview.State, error)
-	apply              func(string) error
+	apply              func(string, bool) error
 	preparePortRestart func(string) error
 	handoffDirect      func(string) error
 	stop               func()
@@ -274,14 +304,14 @@ func serveRuntimeControl(listener *net.UnixListener, commands controlCommands) {
 				current := commands.state()
 				current.Rows = commands.snapshot()
 				_ = writeReply(conn, reply{State: current})
-			case "apply_settings":
+			case "apply_settings", "apply_settings_retain_port":
 				state := commands.state()
 				if req.Token != state.Token || commands.apply == nil {
 					_ = writeReply(conn, failure(ErrIncompatible))
 					return
 				}
 				_ = conn.SetDeadline(time.Now().Add(startTimeout))
-				if err := commands.apply(req.Fingerprint); err != nil {
+				if err := commands.apply(req.Fingerprint, req.Action == "apply_settings_retain_port"); err != nil {
 					_ = writeReply(conn, failure(err))
 					return
 				}
