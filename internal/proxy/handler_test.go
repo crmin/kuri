@@ -14,6 +14,7 @@ import (
 	"github.com/crmin/kuri/internal/accesslog"
 	"github.com/crmin/kuri/internal/forward"
 	"github.com/crmin/kuri/internal/route"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 type httpBackend struct{ upstream http.Handler }
@@ -74,6 +75,26 @@ func TestProxyPreservesRequest(t *testing.T) {
 		entry.Service != "api" || entry.RemotePort != 8080 || entry.Protocol != "tcp" ||
 		entry.LocalAddr != "127.0.0.1" || entry.LocalPort < 30000 || entry.LocalPort >= 40000 {
 		t.Fatalf("missing or invalid request metadata: %+v", entry)
+	}
+}
+
+func TestEphemeralForwardClosesAfterResponse(t *testing.T) {
+	policy := settings.Defaults("").PortForward
+	policy.KeepAlive = false
+	manager := forward.NewManagerWithPolicy(httpBackend{upstream: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "completed")
+	})}, policy)
+	t.Cleanup(manager.Close)
+	logger := &testLog{}
+	handler := New(route.NewContexts("dev", []string{"dev"}), manager, logger, func(err error) { t.Error(err) })
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://api.default.kuri.localhost/", nil))
+	if response.Body.String() != "completed" || len(manager.Snapshot()) != 0 {
+		t.Fatalf("request was unfinished or its tunnel was retained: %s %+v", response.Body, manager.Snapshot())
+	}
+	active, recent := manager.RecentHistory()
+	if active != 0 || len(recent) != 1 || recent[0].Service != "api" {
+		t.Fatalf("unexpected recent state: %d %+v", active, recent)
 	}
 }
 

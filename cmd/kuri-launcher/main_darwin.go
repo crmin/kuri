@@ -47,12 +47,19 @@ type commandResult struct {
 }
 
 func (r commandRunner) run(ctx context.Context, timeout, grace time.Duration, args ...string) commandResult {
+	return r.runInput(ctx, timeout, grace, nil, args...)
+}
+
+func (r commandRunner) runInput(ctx context.Context, timeout, grace time.Duration, input []byte, args ...string) commandResult {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var stdout bytes.Buffer
 	var stderr startupOutput
 	cmd := exec.CommandContext(ctx, r.binary, args...)
 	cmd.Env, cmd.Stdout, cmd.Stderr = r.env, &stdout, &stderr
+	if input != nil {
+		cmd.Stdin = bytes.NewReader(input)
+	}
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = grace
 	err := cmd.Run()
@@ -70,7 +77,7 @@ func (r commandRunner) run(ctx context.Context, timeout, grace time.Duration, ar
 }
 
 func (r commandRunner) state(ctx context.Context) (menuview.State, error) {
-	result := r.run(ctx, 5*time.Second, 20*time.Second, "__menu_state")
+	result := r.run(ctx, 5*time.Second, 20*time.Second, "__menu_state", "--history")
 	var state menuview.State
 	if result.err != nil {
 		return state, fmt.Errorf("%s", result.diagnostic)
@@ -80,7 +87,7 @@ func (r commandRunner) state(ctx context.Context) (menuview.State, error) {
 	}
 	if !((state.Mode == "stopped" && state.PID == 0 && state.Connected == 0 && len(state.Rows) == 0) ||
 		((state.Mode == "background" || state.Mode == "foreground") && state.PID > 0 && state.Started != nil &&
-			state.Connected >= len(state.Rows) && len(state.Rows) <= 5)) {
+			state.Connected >= 0 && len(state.Rows) <= menuview.RecentLimit)) {
 		return menuview.State{}, fmt.Errorf("Invalid kuri server state.")
 	}
 	return state, nil

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/crmin/kuri/internal/settings"
@@ -185,5 +186,36 @@ func TestSavePortRestartsRunningProxy(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestActivateRejectsMismatchedPort(t *testing.T) {
+	app := testApp(t)
+	first, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := first.Addr().(*net.TCPAddr).Port
+	second, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	save := port + 1
+	if save > 65535 {
+		save = port - 1
+	}
+	if _, _, err := settings.NewStore(app.home).Update(t.Context(), func(cfg *settings.Config) error {
+		cfg.Server.Port = save
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = app.serve(t.Context(), background, []net.Listener{first, second}, nil, func(State) error {
+		t.Error("a mismatched listener reached readiness")
+		return errors.New("unexpected readiness")
+	})
+	if err == nil || !strings.Contains(err.Error(), "Apply the saved port") {
+		t.Fatalf("unexpected activation result %v", err)
 	}
 }

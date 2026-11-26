@@ -270,7 +270,8 @@ func TestExhaustedPoolEvictsOldest(t *testing.T) {
 
 func TestEvictedRequestCannotDialReassignedPort(t *testing.T) {
 	manager := testManager(stubBackend{})
-	manager.maxPort = manager.minPort + 1
+	manager.UpdatePolicy(settings.PortForward{KeepAlive: true, Minutes: 60, Trigger: settings.LastRequest,
+		MinPort: 30000, MaxPort: 30000}, nil)
 	defer manager.Close()
 	previous := acquire(t, manager, request("a"))
 	current := acquire(t, manager, request("b"))

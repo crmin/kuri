@@ -22,7 +22,12 @@ Build ./kuri in the current directory before running install.
 On the first macOS run, kuri requests administrator approval if it needs
 to register the LaunchDaemon. Later runs reuse the existing registration.
 
-Hosts:
+Settings are stored in $HOME/.kuri/settings.yaml.
+Automatic startup controls app launch, registered system startup, and
+HTTP activation. An explicit kuri start is available with automatic
+startup disabled.
+
+Hosts with the default service domain:
   service.namespace.ctx.kuri.localhost       Use the service's default port.
   port.service.namespace.ctx.kuri.localhost  Use the specified TCP service port.
   service.namespace.kuri.localhost           Use the current Kubernetes context.

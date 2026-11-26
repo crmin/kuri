@@ -49,6 +49,7 @@
 | macOS 등록 복원 실패 | `The saved port was restored to {previous_port}. The macOS registration could not be restored.` |
 | 이전 포트 저장 복원 실패 | `Could not restore the saved port to {previous_port}.` |
 | 그 외 저장 후 적용 실패 | `Settings saved. The reverse proxy could not apply the changes.` / `Retry Applying Settings` |
+| 실행 중 설정 적용 대기 | `The reverse proxy has settings waiting to be applied.` / `Retry Applying Settings` |
 | 구버전 데몬 안내 | `Update the installed kuri binary to apply the saved settings.` |
 
 ## 저장 계약과 적용 시점
@@ -149,11 +150,20 @@ AppKit의 포인터 이동과 키보드 포커스, 파일 선택 및 창 확인 
 
 격리 macOS 테스트 계정에서는 부팅용 등록이 설정된 상태에서 자동 시작을 Off로 저장하고 재부팅합니다. 앱을 열기 전과 후에 프록시가 중지 상태이고 IPv4/IPv6 HTTP 요청으로도 시작하지 않는지 확인한 뒤, 메뉴 Start와 `kuri start`를 각각 확인합니다. 자동 시작을 다시 켠 뒤 부팅용 등록이 적용되는지도 확인합니다. launchd 대역 테스트와 실제 재부팅 결과를 각각 기록합니다.
 
+## 실행 결과
+
+- Go 전체 테스트, 대상 패키지 race 테스트, `go vet`과 설치 스크립트 구문 검사를 통과했습니다. 설치 대역 테스트에서 두 루프백 포트의 변경과 등록 실패 복구를 확인했습니다.
+- macOS 26.6.2의 임시 사용자 launchd job에서 `RunAtLoad`를 검증했습니다. 자동 시작 Off에서는 IPv4와 IPv6 HTTP 연결이 프록시를 시작하지 않았고, 명시적 활성화는 설정한 포트에서 준비됐습니다. 자동 시작 On의 재등록은 프록시를 시작했습니다. 이 과정에서 사용자의 시스템 시작 등록과 설정은 건드리지 않았습니다.
+- AppKit에 검증용 상태를 주입해 최근 10개 항목, 하위 메뉴의 화면 범위, `Command+,` 창 열기를 확인했습니다. 임시 홈을 쓴 설정 창에서 여섯 개 컨텍스트, 포트 충돌 시 YAML 복원과 입력값 유지, 저장 버튼 바로 위 영문 오류, 성공한 재시도, 창 닫기 확인의 세 버튼을 검증했습니다.
+- Universal 앱과 DMG를 빌드했습니다. `test_dmg.py`에서 이미지 체크섬, 번들 구성, Apple Silicon과 Intel 아키텍처, Finder 배치를 검사했습니다.
+- 실제 재부팅은 격리된 macOS 머신이 확보되면 확인합니다. 현재 증거는 실제 사용자 launchd job과 다른 부팅 식별자를 재현한 테스트까지입니다.
+
 ## TODO
 
 - [x] 현재 메뉴, 서버, CLI와 시작 등록 경로를 확인하고 계획을 작성합니다.
 - [x] 교정한 저장 경로, 즉시 적용과 자동 시작 정책을 독립 검토합니다.
 - [x] 사용자 확인 후 설정 저장소, CLI 및 launchd의 자동 시작 정책을 구현하고 검증합니다.
 - [x] 라우팅, 포트포워드, 최근 이력, 즉시 적용 및 포트 재시작을 구현하고 검증합니다.
-- [ ] 메뉴 막대 및 Settings 창을 구현하고 macOS에서 확인합니다.
-- [ ] README, 요구사항 및 CLI help를 갱신하고 각 작업 단위를 커밋합니다.
+- [x] 메뉴 막대 및 Settings 창을 구현하고 macOS AppKit에서 확인합니다.
+- [x] README, 요구사항 및 CLI help를 갱신하고 각 작업 단위를 커밋합니다.
+- [ ] 격리 macOS에서 실제 재부팅으로 자동 시작을 확인합니다.

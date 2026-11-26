@@ -99,14 +99,16 @@ func run(args []string) int {
 	case len(args) == 1 && args[0] == "__settings_version":
 		fmt.Fprintln(os.Stdout, "1")
 	case len(args) == 1 && args[0] == "__settings_get":
-		err = json.NewEncoder(os.Stdout).Encode(loadSettingsView(ctx, home))
+		err = json.NewEncoder(os.Stdout).Encode(loadSettingsView(ctx, home, app))
 	case len(args) == 1 && args[0] == "__settings_apply":
 		var edit settings.Edit
 		decoder := json.NewDecoder(io.LimitReader(os.Stdin, 1<<20))
 		decoder.DisallowUnknownFields()
 		if err = decoder.Decode(&edit); err == nil {
 			result := updateSettings(ctx, app, home, edit)
-			view := loadSettingsView(context.WithoutCancel(ctx), home)
+			observe, stopObserving := context.WithTimeout(context.WithoutCancel(ctx), 6*time.Second)
+			defer stopObserving()
+			view := loadSettingsView(observe, home, app)
 			view.Saved, view.Applied, view.PortError = result.saved, result.applied, result.portError
 			if result.err != nil {
 				view.Error = result.err.Error()

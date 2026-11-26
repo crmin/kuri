@@ -14,11 +14,7 @@ import (
 	"github.com/crmin/kuri/internal/settings"
 )
 
-func stageStartupBinary(home string) (string, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
+func stageStartupBinary(home, executable string) (string, error) {
 	source, err := os.Open(executable)
 	if err != nil {
 		return "", err
@@ -62,7 +58,11 @@ func changeStartupSetting(ctx context.Context, app settingsServer, home string, 
 	}
 	var changed error
 	if register {
-		source, err := stageStartupBinary(home)
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		source, err := stageStartupBinary(home, executable)
 		if err != nil {
 			return err
 		}

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/crmin/kuri/internal/daemon"
@@ -149,5 +151,47 @@ func TestResetSettingsWritesDefaults(t *testing.T) {
 	if err != nil || !result.applied || after.Fingerprint() != settings.Defaults(home).Fingerprint() ||
 		app.state.Port != after.Server.Port || app.state.ProxyFingerprint != after.ProxyFingerprint() {
 		t.Fatalf("reset did not restore defaults: %+v %+v %v", result, after, err)
+	}
+}
+
+func TestLauncherReportsSettingsPendingForOldDaemon(t *testing.T) {
+	home := t.TempDir()
+	store := settings.NewStore(home)
+	app := &testSettingsServer{store: store, state: daemon.State{PID: 123, Mode: "background"}}
+	view := loadSettingsView(t.Context(), home, app)
+	if !view.ApplyPending || view.RuntimeWarning != "Update the installed kuri binary to apply the saved settings." {
+		t.Fatalf("old daemon reported updated: %+v", view)
+	}
+}
+
+func TestLaunchAtStartupUsesBundledBinary(t *testing.T) {
+	home := t.TempDir()
+	applications := filepath.Join(t.TempDir(), "Applications")
+	bundle := filepath.Join(applications, "kuri.app", "Contents", "MacOS")
+	if err := os.MkdirAll(bundle, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(applications, 0775); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(bundle, "kuri")
+	const content = "the packaged kuri CLI"
+	if err := os.WriteFile(binary, []byte(content), 0755); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stageStartupBinary(home, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(filepath.Dir(staged)) != filepath.Join(home, ".kuri", "installed") {
+		t.Fatalf("binary staged outside the user's installer directory: %s", staged)
+	}
+	got, err := os.ReadFile(staged)
+	if err != nil || string(got) != content {
+		t.Fatalf("staged binary %q, %v", got, err)
+	}
+	info, err := os.Stat(staged)
+	if err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("staged executable permissions: %v, %v", info, err)
 	}
 }

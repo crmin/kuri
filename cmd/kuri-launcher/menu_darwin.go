@@ -72,7 +72,8 @@ func main() {
 		_ = writeStartupLog([]byte(err.Error() + "\n"))
 		return
 	}
-	menu = &menuController{runner: newCommandRunner(launcher), render: renderNative, terminate: func() { C.kuriTerminate() },
+	settingsRunner = newCommandRunner(launcher)
+	menu = &menuController{runner: settingsRunner, render: renderNative, terminate: func() { C.kuriTerminate() },
 		logFailure: func(data []byte) { _ = writeStartupLog(data) }}
 	C.kuriRun()
 }

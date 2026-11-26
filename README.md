@@ -1,6 +1,6 @@
 # kuri
 
-kuri forwards HTTP requests from loopback port 80 on macOS to Kubernetes Services. At startup, kuri reads `$HOME/.kube/config` for the account that runs the server.
+kuri forwards loopback HTTP requests on macOS to Kubernetes Services. It reads `$HOME/.kuri/settings.yaml` for the running account. The default proxy port is 80 and the default kubeconfig path is `$HOME/.kube/config`.
 
 ## macOS 앱으로 실행
 
@@ -8,7 +8,7 @@ kuri forwards HTTP requests from loopback port 80 on macOS to Kubernetes Service
 2. `kuri` 아이콘을 Applications 바로가기 위로 드래그합니다.
 3. 디스크 이미지를 꺼낸 뒤 Finder에서 `/Applications/kuri.app`을 엽니다.
 
-앱은 번들에 포함된 바이너리로 `kuri start`를 실행합니다. 실행 전에 사용자 홈에 `~/.kube/config`를 준비합니다. 첫 실행 때 포트 80을 등록해야 하는 경우 관리자 인증 창이 나타납니다. 이미 LaunchDaemon이 등록되어 있으면 기존 등록을 사용합니다. LaunchDaemon이 별도 위치의 바이너리를 가리키면 앱을 교체해도 기존 바이너리를 계속 실행합니다.
+앱을 처음 열면 `~/.kuri/settings.yaml`에 기본 설정을 저장합니다. 기본값으로 프록시도 시작합니다. 실행 전에 `~/.kube/config`를 준비하거나 Settings에서 다른 kubeconfig를 선택합니다. 수신 포트를 launchd에 처음 등록할 때 관리자 인증 창이 나타날 수 있습니다.
 
 이 DMG는 별도 Developer ID 서명과 Apple 공증 없이 빌드합니다. 다운로드한 앱의 첫 실행을 Gatekeeper가 차단할 수 있습니다. 신뢰할 수 있는 앱은 macOS 정책이 허용할 때 시스템 설정에서 열 수 있습니다. [Apple의 앱 열기 안내](https://support.apple.com/guide/mac-help/mh40617/mac)
 
@@ -20,9 +20,20 @@ kuri forwards HTTP requests from loopback port 80 on macOS to Kubernetes Service
 
 Finder에서 앱이 시작되지 않으면 `~/Library/Logs/kuri/startup.log`에서 최근 실패 원인을 확인합니다. kuri는 이 파일에 오류를 최대 64 KiB까지 기록합니다.
 
-메뉴 막대의 kuri 아이콘을 우클릭하면 Quit와 서버 상태에 맞는 Start 또는 Stop을 사용할 수 있습니다. Stop은 현재 프록시와 포트포워딩을 종료합니다. Quit는 서버와 포트포워딩 정리를 확인하고 앱을 닫습니다. 이 부팅 세션에서는 앱을 다시 열거나 새 CLI의 `kuri start`를 실행할 때까지 HTTP 자동 시작을 차단합니다. 시스템 LaunchDaemon을 일시 중지하거나 재개할 때 관리자 인증이 필요할 수 있습니다.
+메뉴 막대의 kuri 아이콘을 좌클릭하면 서버 PID, 가동 시간, 활성 포트포워딩 수를 확인할 수 있습니다. 스위치로 프록시를 시작하거나 중지합니다. `Recent Services`에 포인터를 올리면 최근 접속한 서비스가 최대 10개 표시됩니다. 항목을 누르면 현재 설정에 맞는 URL을 복사합니다. 우클릭 메뉴에서도 `Start`와 `Stop`을 사용할 수 있습니다.
 
-아이콘을 좌클릭하면 서버 PID와 가동 시간, 전체 활성 포트포워딩 수를 확인할 수 있습니다. 최근 사용한 포워딩은 최대 5개까지 표시됩니다. 스위치로 서버를 시작하거나 중지합니다. 포워딩 항목을 누르면 `kuri.localhost` URL을 클립보드에 복사합니다. 팝오버의 Quit 또는 Command+Q로 서버와 앱을 종료합니다. 실행 중인 데몬이 최근 접속 시각을 보내지 않으면 목록에 `Recent activity unavailable`이 표시됩니다.
+`Quit` 또는 `Command+Q`는 프록시와 포트포워딩을 종료하고 앱을 닫습니다. 현재 부팅 세션에서 자동 시작을 다시 허용하려면 앱을 다시 열거나 `kuri start`를 실행합니다. 앱을 다시 열 때는 General의 자동 시작 옵션을 따릅니다.
+
+### Settings
+
+메뉴에서 `Settings...`를 선택하거나 메뉴가 열려 있을 때 `Command+,`를 누릅니다.
+
+- **General**에서 macOS 시작 등록과 프록시 자동 시작을 설정합니다. 두 옵션을 모두 켜면 macOS 부팅 시 프록시가 시작됩니다. 자동 시작을 끄면 앱 실행이나 HTTP 요청으로도 프록시가 시작되지 않습니다. 메뉴 또는 `kuri start`로 수동 시작할 수 있습니다. 이전 버전이 등록되어 있으면 현재 버전으로 업데이트한 뒤 자동 시작을 끕니다.
+- **Kubernetes**에서 kubeconfig 파일을 열고 라우팅할 컨텍스트를 선택합니다. 파일을 바꾸면 새 파일의 모든 컨텍스트가 켜집니다.
+- **Server**와 **Port Forwarding**에서 도메인, 포트, Keep-Alive와 포트 범위를 설정합니다. 저장한 값은 실행 중인 프록시에 바로 적용됩니다. 수신 포트를 변경하면 프록시가 자동으로 재시작합니다. 포트 변경에 실패하면 저장된 포트를 이전 값으로 되돌립니다. 입력값은 그대로 두고 `Save Server Settings` 위에 오류를 표시합니다.
+- **Logs**에서 접근 로그를 열 수 있습니다. **Reset**은 확인 후 기본값을 다시 저장합니다.
+
+YAML 파일을 직접 편집한 값은 다음 실행 때 적용됩니다.
 
 ### DMG 빌드
 
@@ -55,7 +66,7 @@ kuri start
 
 To run the server in the foreground and view logs, run `kuri`. If kuri needs to register its LaunchDaemon on the first run, it asks for administrator approval once, then starts the server as part of the same command. If a LaunchDaemon is already registered for your account, kuri reuses it.
 
-launchd opens `127.0.0.1:80` and `[::1]:80`. kuri runs with standard user privileges. Once the LaunchDaemon is registered, an incoming HTTP request can start the server if it is stopped.
+launchd can reserve the configured port on both loopback addresses so kuri can run with standard user privileges. When automatic startup is enabled, an incoming HTTP request can start a stopped, registered proxy.
 
 ## Start at boot
 
@@ -66,7 +77,7 @@ CGO_ENABLED=1 go build -o kuri .
 ./kuri install
 ```
 
-`install` creates a symbolic link at `/usr/local/bin/kuri` to `./kuri` in the current directory and registers `/usr/local/bin/kuri start` to run when macOS boots. If the installer needs administrator privileges, it prompts you in the terminal or in a macOS authentication dialog. The server restarts briefly if the first installation replaces an existing LaunchDaemon for port 80.
+`install` links `/usr/local/bin/kuri` to `./kuri` in the current directory and registers the proxy to start when macOS boots. The registered job checks the automatic startup setting before starting the proxy. If the installer needs administrator privileges, it prompts you in the terminal or in a macOS authentication dialog.
 
 To update kuri, run `./kuri install` again from the directory where you built the new binary. If the startup job is already registered, `install` only updates the link. The server uses the new binary the next time it starts. If you move the binary, run the install command again from its new location.
 
@@ -78,7 +89,7 @@ To remove the startup registration, run the following command.
 kuri uninstall
 ```
 
-`uninstall` removes the startup job and the symbolic link. It also stops the LaunchDaemon if it is running. `kuri stop` stops the current server. If port 80 is still registered with launchd, the next connection can restart the server.
+`uninstall` removes the startup job and its symbolic link. It also stops the LaunchDaemon if it is running. When a launchd registration remains in place and automatic startup is enabled, an HTTP connection can start the proxy after `kuri stop`.
 
 If your kubeconfig uses exec authentication, the account that runs kuri must be able to authenticate without terminal input. The `PATH` in the plist includes the Homebrew and standard macOS binary directories.
 
@@ -104,6 +115,8 @@ From the directory that contains the built binary, you can also use `./kuri`.
 | `8080.api.default.dev.kuri.localhost` | Routes requests to TCP port 8080 of the same Service. |
 | `api.default.kuri.localhost` | Looks up `default/api` in the context specified by `current-context` in kubeconfig. |
 
+These examples use the default domain and port. Settings lets you choose which domain styles and Kubernetes contexts the proxy accepts. Add the configured listening port to the URL when it differs from port 80.
+
 For a Service with a single port, kuri uses that port if it is TCP. For a Service with multiple ports, kuri uses the TCP port named `http` by default. To specify a port number in the host, use the Service's `port`. kuri forwards requests to the Pod port identified by the Service's `targetPort`.
 
 If the context name is a lowercase DNS label, use it directly in the host. For other names, use `ctx-` followed by the first 16 hexadecimal characters of the SHA-256 hash of the original name. This command prints the alias for `dev.cluster`.
@@ -114,6 +127,6 @@ printf 'ctx-%s\n' "$(printf %s 'dev.cluster' | shasum -a 256 | cut -c1-16)"
 
 ## Port forwards and access logs
 
-A new port forward starts with a 60-minute lifetime. Each subsequent request on the same forward sets its expiration to 60 seconds after that request. kuri checks the forward every 10 seconds with `HEAD /` and tries to reconnect if it drops before it expires. An active port forward can continue to serve requests during a brief Kubernetes API outage.
+By default, a port forward stays open for 60 minutes after its latest request. You can instead count from the time it opens or close each forward when its request finishes. The default forwarding range is 30000 through 39999, inclusive. When the range is full, kuri closes the oldest reusable forward to make room. kuri checks kept-alive forwards every 10 seconds with `HEAD /` and tries to reconnect until their expiration.
 
 kuri records request outcomes and server start and stop events in English in `$HOME/.kuri/access.log` using JSON Lines format. Before writing a new entry, kuri removes entries older than 72 hours and trims the file to keep it within 100 MiB. `status` writes only to standard output. If console output is blocked in foreground mode and the queue fills up, kuri drops some console messages and continues writing to the log file. At shutdown, kuri waits up to one second for pending console messages to print. If standard error is available, kuri reports dropped messages or interrupted console output there.

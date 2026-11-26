@@ -15,13 +15,15 @@ type settingsView struct {
 	FileError         string          `json:"file_error,omitempty"`
 	KubeconfigError   string          `json:"kubeconfig_error,omitempty"`
 	RegistrationError string          `json:"registration_error,omitempty"`
+	RuntimeWarning    string          `json:"runtime_warning,omitempty"`
+	ApplyPending      bool            `json:"apply_pending,omitempty"`
 	Error             string          `json:"error,omitempty"`
 	PortError         string          `json:"port_error,omitempty"`
 	Saved             bool            `json:"saved"`
 	Applied           bool            `json:"applied"`
 }
 
-func loadSettingsView(ctx context.Context, home string) settingsView {
+func loadSettingsView(ctx context.Context, home string, app settingsServer) settingsView {
 	store := settings.NewStore(home)
 	cfg, err := store.Ensure(ctx)
 	view := settingsView{Config: cfg, Contexts: []string{}}
@@ -40,6 +42,15 @@ func loadSettingsView(ctx context.Context, home string) settingsView {
 		view.KubeconfigError = err.Error()
 	} else {
 		view.Contexts = kube.ContextNames()
+	}
+	if view.FileError == "" {
+		if state, err := app.State(ctx); err == nil && state.PID != 0 && state.ProxyFingerprint != view.Config.ProxyFingerprint() {
+			view.ApplyPending = true
+			view.RuntimeWarning = "The reverse proxy has settings waiting to be applied."
+			if state.ProxyFingerprint == "" {
+				view.RuntimeWarning = "Update the installed kuri binary to apply the saved settings."
+			}
+		}
 	}
 	return view
 }

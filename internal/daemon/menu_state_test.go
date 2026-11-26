@@ -78,6 +78,33 @@ func TestMenuStateRequestsBoundedSnapshot(t *testing.T) {
 	}
 }
 
+func TestRecentHistoryMenuCompatibility(t *testing.T) {
+	app := testApp(t)
+	if err := os.Mkdir(filepath.Join(app.home, ".kuri"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := openRuntimeControl(filepath.Join(app.home, ".kuri", "ctl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	state := State{Mode: background, PID: os.Getpid(), Started: time.Now(), Token: "test-history"}
+	go serveRuntimeControl(listener, controlCommands{menu: func(history bool) (menuview.State, error) {
+		if history {
+			return makeMenuState(state, 0, make([]forward.Row, menuview.RecentLimit), true)
+		}
+		return makeMenuState(state, 1, make([]forward.Row, 1), true)
+	}})
+	oldView, err := app.MenuState(t.Context())
+	if err != nil || oldView.Connected != 1 || len(oldView.Rows) != 1 {
+		t.Fatalf("legacy active-only state: %+v, %v", oldView, err)
+	}
+	currentView, err := app.MenuHistory(t.Context())
+	if err != nil || currentView.Connected != 0 || len(currentView.Rows) != 10 {
+		t.Fatalf("recent history state: %+v, %v", currentView, err)
+	}
+}
+
 func TestCancelReadOnlyStateClosesSocket(t *testing.T) {
 	for _, menu := range []bool{false, true} {
 		t.Run(fmt.Sprint(menu), func(t *testing.T) {
