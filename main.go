@@ -69,7 +69,7 @@ func run(args []string) int {
 		if err == nil {
 			fmt.Printf("Stopped kuri (PID %d).\n", pid)
 		}
-	case len(args) == 1 && args[0] == "state":
+	case len(args) == 1 && args[0] == "status":
 		var state daemon.State
 		state, err = app.State(ctx)
 		if err == nil {

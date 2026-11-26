@@ -67,9 +67,12 @@ func TestHelpCommands(t *testing.T) {
 	if err := WriteHelp(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, part := range []string{"kuri", "foreground", "help", "start", "background", "stop", "state", "SHA-256"} {
+	for _, part := range []string{"kuri", "foreground", "help", "start", "background", "stop", "kuri status", "SHA-256"} {
 		if !strings.Contains(out.String(), part) {
 			t.Errorf("help is missing %q", part)
 		}
+	}
+	if strings.Contains(out.String(), "kuri state") {
+		t.Fatal("help lists the old command")
 	}
 }

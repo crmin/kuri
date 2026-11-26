@@ -13,7 +13,7 @@ Usage:
   kuri help   Show this help and exit.
   kuri start  Start the proxy in the background.
   kuri stop   Stop the running background process and print its PID.
-  kuri state  Print server status and the active port forwards.
+  kuri status Print server status and the active port forwards.
 
 Use go run . in place of kuri when working from the source directory.
 On the first macOS run, kuri requests administrator approval if it needs
