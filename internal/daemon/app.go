@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,9 +87,13 @@ func (app *App) activate(ctx context.Context, mode string) (int, error) {
 		unblock()
 		return 0, err
 	}
-	decoder := json.NewDecoder(conn)
-	state, err := decodeReply(decoder)
+	reader := bufio.NewReader(conn)
+	frame, err := reader.ReadBytes('\n')
 	unblock()
+	if err != nil {
+		return 0, fmt.Errorf("read launchd readiness: %w", err)
+	}
+	state, err := decodeReply(json.NewDecoder(bytes.NewReader(frame)))
 	if err != nil {
 		return 0, fmt.Errorf("start the launchd instance: %w", err)
 	}
@@ -104,7 +110,7 @@ func (app *App) activate(ctx context.Context, mode string) (int, error) {
 		_ = conn.SetReadDeadline(time.Now().Add(startTimeout))
 	})
 	defer requestStop()
-	_, err = io.Copy(app.stdout, io.MultiReader(decoder.Buffered(), conn))
+	_, err = io.Copy(app.stdout, reader)
 	return state.PID, err
 }
 

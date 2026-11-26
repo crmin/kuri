@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -135,4 +136,46 @@ func TestDaemonExitHelper(t *testing.T) {
 	}
 	// Ensure the IPC acknowledgement and process exit are observable separately.
 	time.Sleep(200 * time.Millisecond)
+}
+
+func TestForegroundActivationMirrorsOnlyLogLines(t *testing.T) {
+	app := testApp(t)
+	var stdout bytes.Buffer
+	app.stdout = &stdout
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: app.activation, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	const logLine = "{\"event\":\"startup\"}\n"
+	serve := make(chan error, 1)
+	go func() {
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			serve <- err
+			return
+		}
+		defer conn.Close()
+		if _, err := readRequest(conn); err != nil {
+			serve <- err
+			return
+		}
+		var frames bytes.Buffer
+		if err := writeReply(&frames, reply{State: State{PID: 42, Mode: foreground, Token: "fresh"}}); err != nil {
+			serve <- err
+			return
+		}
+		frames.WriteString(logLine)
+		_, err = conn.Write(frames.Bytes())
+		serve <- err
+	}()
+	if _, err := app.activate(t.Context(), foreground); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serve; err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != logLine {
+		t.Fatalf("console received control data: %q", got)
+	}
 }
