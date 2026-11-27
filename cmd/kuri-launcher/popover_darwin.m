@@ -6,11 +6,34 @@
 extern void kuriGoVisible(int visible);
 extern void kuriGoAction(int action);
 
+static const CGFloat recentCornerRadius = 12;
+
 @interface KuriPopoverCanvas : NSView
 @end
 
 @implementation KuriPopoverCanvas
 - (BOOL)isFlipped { return YES; }
+@end
+
+@interface KuriRecentMenuCanvas : KuriPopoverCanvas
+@end
+
+@implementation KuriRecentMenuCanvas
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
+    [center removeObserver:self name:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification object:nil];
+    if (self.window) {
+        [center addObserver:self selector:@selector(displayOptionsChanged:)
+                       name:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification object:nil];
+    }
+}
+- (void)displayOptionsChanged:(NSNotification *)notification { self.needsDisplay = YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceTransparency) return;
+    [[NSColor.windowBackgroundColor colorWithAlphaComponent:1] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:recentCornerRadius yRadius:recentCornerRadius] fill];
+}
 @end
 
 @interface KuriShortcutLabel : NSTextField
@@ -20,14 +43,10 @@ extern void kuriGoAction(int action);
 - (NSView *)hitTest:(NSPoint)point { return nil; }
 @end
 
-static NSColor *primaryColor(NSView *view) {
-    NSAppearanceName appearance = [view.effectiveAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
-    return [appearance isEqualToString:NSAppearanceNameDarkAqua] ? [NSColor whiteColor] : [NSColor labelColor];
-}
-
 @interface KuriPopoverButton : NSButton
 @property(nonatomic) BOOL tracksHover;
 @property(nonatomic) BOOL hovered;
+@property(nonatomic) BOOL submenuOpen;
 @property(nonatomic, retain) NSTrackingArea *rowTrackingArea;
 @property(nonatomic) SEL hoverAction;
 @property(nonatomic) SEL leaveAction;
@@ -35,22 +54,30 @@ static NSColor *primaryColor(NSView *view) {
 @end
 
 @implementation KuriPopoverButton
-- (BOOL)showsHover { return self.tracksHover && self.hovered && self.enabled; }
+- (BOOL)showsHighlight { return self.tracksHover && (self.hovered || self.submenuOpen) && self.enabled; }
 
 - (void)setRowTitle:(NSString *)title {
-    NSColor *color = [self showsHover] ? [NSColor controlAccentColor] : primaryColor(self);
+    NSColor *color = [self showsHighlight] ? NSColor.selectedMenuItemTextColor : NSColor.labelColor;
+    if (!self.enabled) color = NSColor.disabledControlTextColor;
     NSMutableParagraphStyle *paragraph = [[[NSMutableParagraphStyle alloc] init] autorelease];
     paragraph.alignment = NSTextAlignmentLeft;
     paragraph.lineBreakMode = NSLineBreakByTruncatingTail;
+    paragraph.firstLineHeadIndent = 6;
+    paragraph.tailIndent = -6;
     self.attributedTitle = [[[NSAttributedString alloc] initWithString:title attributes:@{
         NSForegroundColorAttributeName: color, NSFontAttributeName: self.font,
         NSParagraphStyleAttributeName: paragraph,
     }] autorelease];
     self.needsDisplay = YES;
 }
+- (void)setEnabled:(BOOL)enabled {
+    if (self.enabled == enabled) return;
+    [super setEnabled:enabled];
+    if (self.font) [self setRowTitle:self.title];
+}
 - (void)drawRect:(NSRect)dirtyRect {
-    if ([self showsHover]) {
-        [[[NSColor controlAccentColor] colorWithAlphaComponent:0.16] setFill];
+    if ([self showsHighlight]) {
+        [NSColor.selectedContentBackgroundColor setFill];
         [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 0, 1) xRadius:4 yRadius:4] fill];
     }
     [super drawRect:dirtyRect];
@@ -85,6 +112,21 @@ static NSColor *primaryColor(NSView *view) {
 }
 @end
 
+@interface KuriRecentMenuButton : KuriPopoverButton <NSAccessibilityButton>
+@end
+
+@implementation KuriRecentMenuButton
+- (BOOL)isAccessibilityElement { return YES; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityMenuButtonRole; }
+- (NSString *)accessibilityLabel { return self.title; }
+- (BOOL)isAccessibilityExpanded { return self.submenuOpen; }
+- (BOOL)accessibilityPerformPress {
+    if (!self.enabled) return NO;
+    [self performClick:nil];
+    return YES;
+}
+@end
+
 @interface KuriPopover ()
 @property(nonatomic, retain) NSPopover *popover;
 @property(nonatomic, retain) NSTextField *serverStatus;
@@ -110,6 +152,7 @@ static NSColor *primaryColor(NSView *view) {
 @property(nonatomic, retain) id resignObserver;
 @property(nonatomic, assign) NSStatusBarButton *anchor;
 @property(nonatomic, retain) NSPanel *recentPanel;
+@property(nonatomic, retain) KuriPopoverCanvas *recentContent;
 @property(nonatomic, retain) NSTextField *emptyRecent;
 @property(nonatomic) NSInteger recentFocus;
 @property(nonatomic) BOOL recentAvailable;
@@ -118,6 +161,20 @@ static NSColor *primaryColor(NSView *view) {
 
 static const CGFloat width = 346;
 static const CGFloat padding = 13;
+static const CGFloat menuRowHeight = 24;
+static const CGFloat recentInset = 8;
+
+static NSImage *recentMenuMask(void) {
+    CGFloat size = 2 * recentCornerRadius + 1;
+    NSImage *mask = [NSImage imageWithSize:NSMakeSize(size, size) flipped:NO drawingHandler:^BOOL(NSRect rect) {
+        [NSColor.whiteColor setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:rect xRadius:recentCornerRadius yRadius:recentCornerRadius] fill];
+        return YES;
+    }];
+    mask.capInsets = NSEdgeInsetsMake(recentCornerRadius, recentCornerRadius, recentCornerRadius, recentCornerRadius);
+    mask.resizingMode = NSImageResizingModeStretch;
+    return mask;
+}
 
 static NSTextField *label(NSString *text, NSFont *font, NSColor *color) {
     NSTextField *field = [NSTextField labelWithString:text];
@@ -133,15 +190,15 @@ static NSBox *line(void) {
     return box;
 }
 
-static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL tracksHover) {
-    KuriPopoverButton *button = [[[KuriPopoverButton alloc] initWithFrame:NSZeroRect] autorelease];
+static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Class buttonClass) {
+    KuriPopoverButton *button = [[[buttonClass alloc] initWithFrame:NSZeroRect] autorelease];
     button.target = target;
     button.action = action;
     button.bordered = NO;
     button.alignment = NSTextAlignmentLeft;
     button.font = [NSFont systemFontOfSize:13];
     button.lineBreakMode = NSLineBreakByTruncatingTail;
-    button.tracksHover = tracksHover;
+    button.tracksHover = YES;
     [button setRowTitle:title];
     return button;
 }
@@ -172,19 +229,19 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
     self.rowsLine = line();
     self.problem = label(@"", [NSFont systemFontOfSize:12], [NSColor systemRedColor]);
     self.quitLine = line();
-    self.recentButton = rowButton(@"Recent Services", self, @selector(toggleRecent:), YES);
+    self.recentButton = rowButton(@"Recent Services", self, @selector(toggleRecent:), KuriRecentMenuButton.class);
     self.recentButton.hoverAction = @selector(showRecent:);
     self.recentButton.leaveAction = @selector(scheduleRecentClose:);
     self.recentArrow = [KuriShortcutLabel labelWithString:@"\u203a"];
     self.recentArrow.font = [NSFont systemFontOfSize:18];
     self.recentArrow.textColor = secondary;
     self.recentArrow.alignment = NSTextAlignmentRight;
-    self.settingsButton = rowButton(@"Settings...", self, @selector(openSettings:), YES);
+    self.settingsButton = rowButton(@"Settings...", self, @selector(openSettings:), KuriPopoverButton.class);
     self.settingsShortcut = [KuriShortcutLabel labelWithString:@"\u2318 ,"];
     self.settingsShortcut.font = regular;
     self.settingsShortcut.textColor = secondary;
     self.settingsShortcut.alignment = NSTextAlignmentRight;
-    self.quitButton = rowButton(@"Quit", self, @selector(quit:), YES);
+    self.quitButton = rowButton(@"Quit", self, @selector(quit:), KuriPopoverButton.class);
     self.shortcut = [KuriShortcutLabel labelWithString:@"\u2318 Q"];
     self.shortcut.font = regular;
     self.shortcut.textColor = secondary;
@@ -307,9 +364,9 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
     if (![self.rows isEqualToArray:next]) [self rebuildRows:next];
     self.rowsLine.frame = NSMakeRect(padding, y, width - 2 * padding, 1);
     y += 5;
-    self.recentButton.frame = NSMakeRect(padding, y, width - 2 * padding, 24);
-    self.recentArrow.frame = NSMakeRect(width - 36, y - 2, 15, 24);
-    y += 27;
+    self.recentButton.frame = NSMakeRect(padding, y, width - 2 * padding, menuRowHeight);
+    self.recentArrow.frame = NSMakeRect(width - 36, y - 2, 15, menuRowHeight);
+    y += menuRowHeight + 3;
     for (NSDictionary *row in self.rows) {
         KuriPopoverButton *button = self.rowButtons[row[@"id"]];
         button.enabled = self.recentEnabled && [row[@"url"] length] != 0;
@@ -329,9 +386,9 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
         y += 23;
     }
     self.quitLine.frame = NSMakeRect(padding, y, width - 2 * padding, 1);
-    self.settingsButton.frame = NSMakeRect(padding, y + 4, width - 2 * padding, 24);
+    self.settingsButton.frame = NSMakeRect(padding, y + 4, width - 2 * padding, menuRowHeight);
     self.settingsShortcut.frame = NSMakeRect(width - 60, y + 8, 47, 18);
-    self.quitButton.frame = NSMakeRect(padding, y + 28, width - 2 * padding, 24);
+    self.quitButton.frame = NSMakeRect(padding, y + 28, width - 2 * padding, menuRowHeight);
     self.shortcut.frame = NSMakeRect(width - 60, y + 32, 47, 18);
     NSSize size = NSMakeSize(width, y + 58);
     [self.view setFrameSize:size];
@@ -353,12 +410,12 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
 
 - (void)addRecentRows {
     for (NSDictionary *row in self.rows) {
-        KuriPopoverButton *button = rowButton(row[@"label"], self, @selector(copyForward:), YES);
+        KuriPopoverButton *button = rowButton(row[@"label"], self, @selector(copyForward:), KuriPopoverButton.class);
         button.identifier = row[@"id"];
         button.toolTip = [row[@"url"] length] ? row[@"url"] : @"No verified URL for this port forward.";
         button.leaveAction = @selector(scheduleRecentClose:);
         button.enabled = self.recentEnabled && [row[@"url"] length] != 0;
-        [self.recentPanel.contentView addSubview:button];
+        [self.recentContent addSubview:button];
         self.rowButtons[button.identifier] = button;
     }
     for (NSString *key in self.feedback.allKeys) {
@@ -378,14 +435,24 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
             backing:NSBackingStoreBuffered defer:NO] autorelease];
         self.recentPanel.releasedWhenClosed = NO;
         self.recentPanel.hasShadow = YES;
-        self.recentPanel.backgroundColor = NSColor.windowBackgroundColor;
-        self.recentPanel.contentView = [[[KuriPopoverCanvas alloc] initWithFrame:NSMakeRect(0, 0, 280, 40)] autorelease];
+        self.recentPanel.opaque = NO;
+        self.recentPanel.backgroundColor = NSColor.clearColor;
+        NSVisualEffectView *surface = [[[NSVisualEffectView alloc] initWithFrame:self.recentPanel.contentView.bounds] autorelease];
+        surface.material = NSVisualEffectMaterialMenu;
+        surface.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+        surface.state = NSVisualEffectStateActive;
+        surface.maskImage = recentMenuMask();
+        self.recentPanel.contentView = surface;
+
+        self.recentContent = [[[KuriRecentMenuCanvas alloc] initWithFrame:surface.bounds] autorelease];
+        self.recentContent.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [surface addSubview:self.recentContent];
         self.emptyRecent = label(@"", [NSFont systemFontOfSize:13], NSColor.secondaryLabelColor);
-        [self.recentPanel.contentView addSubview:self.emptyRecent];
+        [self.recentContent addSubview:self.emptyRecent];
         NSTrackingArea *tracking = [[[NSTrackingArea alloc] initWithRect:NSZeroRect
             options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
             owner:self userInfo:nil] autorelease];
-        [self.recentPanel.contentView addTrackingArea:tracking];
+        [self.recentContent addTrackingArea:tracking];
         [self addRecentRows];
     }
     [self layoutRecent];
@@ -394,8 +461,9 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
         [self.recentPanel orderFront:nil];
     }
     self.recentButton.hovered = YES;
+    self.recentButton.submenuOpen = YES;
     [self.recentButton setRowTitle:@"Recent Services"];
-    [self.recentButton setAccessibilityExpanded:YES];
+    self.recentArrow.textColor = NSColor.selectedMenuItemTextColor;
 }
 
 - (NSRect)recentAnchorRect {
@@ -410,17 +478,18 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
     if (!screen) return;
     NSRect usable = screen.visibleFrame;
     CGFloat paneWidth = MIN(310, NSWidth(usable));
-    CGFloat height = 12 + 24 * MAX(1, self.rows.count);
+    CGFloat height = 2 * recentInset + menuRowHeight * MAX(1, self.rows.count);
     CGFloat x = NSMaxX(parent) + 3;
     if (x + paneWidth > NSMaxX(usable)) x = NSMinX(parent) - paneWidth - 3;
     x = MAX(NSMinX(usable), MIN(x, NSMaxX(usable) - paneWidth));
-    CGFloat y = MAX(NSMinY(usable), MIN(NSMaxY(anchor) + 6 - height, NSMaxY(usable) - height));
+    CGFloat y = MAX(NSMinY(usable), MIN(NSMaxY(anchor) + recentInset - height, NSMaxY(usable) - height));
     [self.recentPanel setFrame:NSMakeRect(x, y, paneWidth, height) display:YES];
     self.emptyRecent.stringValue = self.recentAvailable ? @"No recent services" : @"Recent activity unavailable";
-    self.emptyRecent.frame = NSMakeRect(10, 8, paneWidth - 20, 20);
+    self.emptyRecent.frame = NSMakeRect(recentInset, recentInset, paneWidth - 2 * recentInset, menuRowHeight);
     self.emptyRecent.hidden = self.rows.count != 0;
     [self.rows enumerateObjectsUsingBlock:^(NSDictionary *row, NSUInteger index, BOOL *stop) {
-        self.rowButtons[row[@"id"]].frame = NSMakeRect(6, 6 + 24 * index, paneWidth - 12, 24);
+        self.rowButtons[row[@"id"]].frame = NSMakeRect(recentInset, recentInset + menuRowHeight * index,
+                                                       paneWidth - 2 * recentInset, menuRowHeight);
     }];
 }
 
@@ -429,9 +498,15 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
     [self.recentPanel.parentWindow removeChildWindow:self.recentPanel];
     [self.recentPanel orderOut:nil];
     self.recentFocus = -1;
+    for (KuriPopoverButton *button in self.rowButtons.allValues) {
+        if (!button.hovered) continue;
+        button.hovered = NO;
+        [button setRowTitle:button.title];
+    }
     self.recentButton.hovered = NO;
+    self.recentButton.submenuOpen = NO;
     [self.recentButton setRowTitle:@"Recent Services"];
-    [self.recentButton setAccessibilityExpanded:NO];
+    self.recentArrow.textColor = NSColor.secondaryLabelColor;
 }
 
 - (void)mouseExited:(NSEvent *)event { [self scheduleRecentClose:nil]; }
@@ -442,10 +517,6 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, BOOL
         NSPoint pointer = NSEvent.mouseLocation;
         if (!NSPointInRect(pointer, [self recentAnchorRect]) && !NSPointInRect(pointer, self.recentPanel.frame))
             [self closeRecent];
-        else {
-            self.recentButton.hovered = YES;
-            [self.recentButton setRowTitle:@"Recent Services"];
-        }
     });
 }
 
