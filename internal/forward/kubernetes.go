@@ -69,6 +69,11 @@ func LoadKubernetes(filename string) (*Kubernetes, route.Contexts, error) {
 
 func (k *Kubernetes) Fingerprint() string { return k.fingerprint }
 
+func (k *Kubernetes) HasContext(name string) bool {
+	_, exists := k.config.Contexts[name]
+	return exists
+}
+
 func (k *Kubernetes) ContextNames() []string {
 	names := make([]string, 0, len(k.config.Contexts))
 	for name := range k.config.Contexts {

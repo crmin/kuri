@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"slices"
 
 	"github.com/crmin/kuri/internal/forward"
 	"github.com/crmin/kuri/internal/launchd"
@@ -73,16 +72,15 @@ func validateKubernetesEdit(cfg settings.Config, edit settings.Edit) error {
 	if err != nil {
 		return err
 	}
-	if edit.Context != nil && !slices.Contains(kube.ContextNames(), edit.Context.Name) {
+	if edit.Context != nil && !kube.HasContext(edit.Context.Name) {
 		return errKubeContextChanged
 	}
 	if aliases := edit.ContextAliases; aliases != nil {
 		if aliases.Fingerprint != kube.Fingerprint() {
 			return errKubeconfigChanged
 		}
-		names := kube.ContextNames()
 		for name := range aliases.Aliases {
-			if !slices.Contains(names, name) {
+			if !kube.HasContext(name) {
 				return errKubeContextChanged
 			}
 		}

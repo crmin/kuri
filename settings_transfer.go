@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"slices"
 	"time"
 
 	"github.com/crmin/kuri/internal/forward"
@@ -79,9 +78,8 @@ func importSettings(ctx context.Context, app settingsServer, home string, store 
 			return settingsTransferReply{Refresh: true}
 		}
 		aliases := make(map[string]string)
-		names := kube.ContextNames()
 		for name, alias := range selected.Kubernetes.Aliases {
-			if slices.Contains(names, name) {
+			if kube.HasContext(name) {
 				aliases[name] = alias
 			}
 		}
