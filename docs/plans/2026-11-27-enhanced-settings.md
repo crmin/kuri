@@ -99,7 +99,7 @@ macOS에서 `go test ./...`, `go test -race ./...`, `go vet ./...`, `go build ./
 | 단계 | 변경 위치와 목적 | 커밋 메시지 |
 | --- | --- | --- |
 | 1 | cmd/kuri-launcher/popover_darwin.m, statusitem_darwin.m, settings_darwin.m의 메뉴 배치와 키 처리, 같은 디렉터리의 popover_darwin_test.go, settings_darwin_test.go, testdata의 AppKit 이벤트 검사 | fix(menu): 메뉴 구분선과 입력기 독립 단축키 적용 |
-| 2a | deploy/macos/VERSION의 목표 버전, build-app.sh와 Info.plist의 태그 및 UTC 개발 버전 기록, 신규 deploy/macos/test_build_version.py와 기존 test_dmg.py의 버전 검증, README.md의 상시 빌드 버전 규칙 | build(macos): 릴리스 태그와 UTC 개발 버전 적용 |
+| 2a | deploy/macos/VERSION의 목표 버전, build-version.sh의 태그 및 UTC 버전 결정, build-app.sh의 Info.plist 버전 기록, 신규 deploy/macos/test_build_version.py와 기존 test_dmg.py의 버전 검증, README.md의 상시 빌드 버전 규칙 | build(macos): 릴리스 태그와 UTC 개발 버전 적용 |
 | 2b | cmd/kuri-launcher/settings_darwin.m의 build, applyResponse, reveal과 About의 번들 버전 표시, settings_darwin_test.go의 탭과 표시 확인 | feat(settings): 설정 탭과 앱 정보 화면 추가 |
 | 3 | internal/settings/config.go, edit.go, store.go, settings_test.go의 기본값, 지문 및 저장, internal/forward/manager.go, policy.go, manager_test.go의 재사용/일회성 타이머와 복구, main.go, settings_lifecycle.go, settings_view.go의 호환 확인과 업데이트 안내, internal/launchd/{registration_darwin,install_stub}.go와 internal/daemon/{wire,activation,activation_info,reload}.go의 기능 확인, 등록과 설정 적용 테스트, cmd/kuri-launcher/settings_darwin.m과 settings_darwin_test.go의 입력 상태 | feat(forward): 자동 복구 활성화와 검사 주기 설정 추가 |
 | 4 | internal/settings/config.go, edit.go, store.go, settings_test.go와 settings_view.go, settings_lifecycle.go의 별칭 편집 검증 및 저장, internal/route/host.go와 route_test.go의 주소 해석과 생성, internal/forward/kubernetes.go, policy.go, manager.go, lease.go와 internal/daemon/reload.go, reload_test.go의 kubeconfig 재검증, 즉시 적용과 검사 Host, cmd/kuri-launcher/settings_darwin.m, settings_darwin_test.go의 행과 편집 창 | feat(route): Kubernetes 컨텍스트 별칭 설정과 라우팅 추가 |
@@ -117,7 +117,7 @@ macOS에서 `go test ./...`, `go test -race ./...`, `go vet ./...`, `go build ./
 - [x] 추가 요구 반영본 독립 검토
 - [x] 구현 승인
 - [x] 메뉴와 창 단축키 구현, 런처 회귀 테스트와 커밋 (macOS 입력기 확인은 전체 검증에서 수행)
-- [ ] 릴리스 및 UTC 개발 빌드 버전 구현, 태그 및 DMG 검증, 상시 규칙 문서화와 커밋
+- [x] 릴리스 및 UTC 개발 빌드 버전 구현, 태그 테스트, 상시 규칙 문서화와 커밋 (DMG는 전체 검증에서 확인)
 - [ ] 설정 탭과 About 구현, 검증, 문서 갱신과 커밋
 - [ ] 자동 복구 정책 구현, 검증, 문서 갱신과 커밋
 - [ ] 컨텍스트 별칭 구현, 검증, 문서 갱신과 커밋

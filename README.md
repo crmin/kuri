@@ -50,6 +50,8 @@ python -m pip install -r deploy/macos/dmg-requirements.txt
 
 `dist/kuri.dmg`가 생성됩니다. 파일 위치를 지정하려면 `--output /path/to/kuri.dmg`를 사용합니다. 앱에는 Apple Silicon과 Intel용 실행 파일이 들어 있습니다.
 
+정식 빌드는 변경이 없는 `release/vX.Y.Z` 태그 커밋에서 만듭니다. 개발 빌드는 `deploy/macos/VERSION`에 기록된 목표 버전에 `-rc{yyyymmddhhmm}`을 붙입니다. 접미사에는 빌드를 시작한 시각을 UTC로 표시합니다. 다음 릴리스를 준비할 때 `VERSION`을 새 목표 버전으로 바꿉니다. About에서 전체 버전을 확인할 수 있습니다.
+
 DMG의 구성과 Finder 배치를 검사하려면 같은 가상 환경에서 다음 명령을 실행합니다.
 
 ```sh

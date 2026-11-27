@@ -11,6 +11,9 @@ if [[ $(uname -s) != Darwin ]]; then
 fi
 
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+app_version=$(/bin/bash "$script_dir/build-version.sh")
+base_version=${app_version#v}
+base_version=${base_version%%-*}
 mkdir -p -- "$(dirname -- "$1")"
 output_dir=$(cd -- "$(dirname -- "$1")" && pwd)
 app_name=$(basename -- "$1")
@@ -41,6 +44,8 @@ mkdir -p -- "$app/Contents/MacOS" "$app/Contents/Resources"
 lipo -create "$build_dir/kuri-arm64" "$build_dir/kuri-amd64" -output "$app/Contents/MacOS/kuri"
 lipo -create "$build_dir/launcher-arm64" "$build_dir/launcher-amd64" -output "$app/Contents/MacOS/kuri-launcher"
 cp -- "$script_dir/Info.plist" "$app/Contents/Info.plist"
+plutil -insert CFBundleShortVersionString -string "$base_version" "$app/Contents/Info.plist"
+plutil -insert KuriVersion -string "$app_version" "$app/Contents/Info.plist"
 cp -- "$script_dir/kuri.icns" "$app/Contents/Resources/kuri.icns"
 
 mv -n -- "$app" "$output_dir/"
