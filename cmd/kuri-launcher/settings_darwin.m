@@ -21,6 +21,16 @@ static NSTextField *settingsLabel(NSString *text, NSColor *color) {
     return field;
 }
 
+static NSFont *settingsItemFont(void) {
+    return [NSFont boldSystemFontOfSize:13];
+}
+
+static NSTextField *settingsItemLabel(NSString *title) {
+    NSTextField *label = [NSTextField labelWithString:title];
+    label.font = settingsItemFont();
+    return label;
+}
+
 static NSStackView *settingsStack(NSUserInterfaceLayoutOrientation orientation, CGFloat gap) {
     NSStackView *stack = [NSStackView stackViewWithViews:@[]];
     stack.orientation = orientation;
@@ -65,7 +75,6 @@ static NSString *settingsString(id value) {
 }
 
 @interface KuriSettings ()
-@property(nonatomic, retain) NSStackView *body;
 @property(nonatomic, retain) NSStackView *contexts;
 @property(nonatomic, retain) NSTextField *path;
 @property(nonatomic, retain) NSTextField *problem;
@@ -127,14 +136,23 @@ static NSString *settingsString(id value) {
     [self.window makeKeyAndOrderFront:nil];
 }
 
-- (void)addSection:(NSString *)name {
+- (NSStackView *)addSection:(NSString *)name to:(NSStackView *)sections {
+    NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 16);
+    row.alignment = NSLayoutAttributeTop;
     NSTextField *heading = [NSTextField labelWithString:name];
     heading.font = [NSFont boldSystemFontOfSize:14];
-    [self.body addArrangedSubview:heading];
+    heading.alignment = NSTextAlignmentRight;
+    [row addArrangedSubview:heading];
+    [heading.widthAnchor constraintEqualToConstant:120].active = YES;
+
+    NSStackView *section = settingsStack(NSUserInterfaceLayoutOrientationVertical, 9);
+    [row addArrangedSubview:section];
+    addFullWidth(sections, row);
+    return section;
 }
 
-- (void)addDescription:(NSString *)text {
-    addFullWidth(self.body, settingsLabel(text, NSColor.secondaryLabelColor));
+- (void)addDescription:(NSString *)text to:(NSStackView *)section {
+    addFullWidth(section, settingsLabel(text, NSColor.secondaryLabelColor));
 }
 
 - (NSButton *)button:(NSString *)title action:(SEL)action {
@@ -143,28 +161,34 @@ static NSString *settingsString(id value) {
     return button;
 }
 
-- (NSButton *)checkbox:(NSString *)title identifier:(NSString *)identifier {
+- (NSButton *)checkbox:(NSString *)title identifier:(NSString *)identifier inSection:(NSStackView *)section {
     NSButton *button = [NSButton checkboxWithTitle:title target:self action:@selector(toggle:)];
     button.identifier = identifier;
+    button.font = settingsItemFont();
+    button.alignment = NSTextAlignmentLeft;
+    button.usesSingleLineMode = YES;
+    button.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [button setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self.controls addObject:button];
-    [self.body addArrangedSubview:button];
+    addFullWidth(section, button);
     return button;
 }
 
-- (void)field:(NSString *)name identifier:(NSString *)identifier width:(CGFloat)width unit:(NSString *)unit {
+- (void)field:(NSString *)name identifier:(NSString *)identifier width:(CGFloat)width unit:(NSString *)unit
+    inSection:(NSStackView *)section {
     NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
-    NSTextField *label = [NSTextField labelWithString:name];
+    NSTextField *label = settingsItemLabel(name);
     NSTextField *field = [[[NSTextField alloc] initWithFrame:NSZeroRect] autorelease];
     [field setAccessibilityLabel:name];
     field.identifier = identifier;
     field.maximumNumberOfLines = 1;
     [row addArrangedSubview:label];
-    [label.widthAnchor constraintEqualToConstant:166].active = YES;
+    [label.widthAnchor constraintEqualToConstant:132].active = YES;
     [row addArrangedSubview:field];
     if (width > 0) [field.widthAnchor constraintEqualToConstant:width].active = YES;
     if (unit) [row addArrangedSubview:[NSTextField labelWithString:unit]];
-    if (width > 0) [self.body addArrangedSubview:row];
-    else addFullWidth(self.body, row);
+    if (width > 0) [section addArrangedSubview:row];
+    else addFullWidth(section, row);
     [self.controls addObject:field];
     self.fields[identifier] = field;
 }
@@ -172,7 +196,6 @@ static NSString *settingsString(id value) {
 - (void)build {
     NSStackView *body = nil;
     NSScrollView *scroll = settingsScroll(&body, 24, 9, NSNoBorder);
-    self.body = body;
     [self.window setContentView:scroll];
     self.problem = settingsLabel(@"", NSColor.systemRedColor);
     self.problem.hidden = YES;
@@ -181,77 +204,80 @@ static NSString *settingsString(id value) {
     self.retry.hidden = YES;
     [body addArrangedSubview:self.retry];
 
-    [self addSection:@"General"];
-    self.registration = [self checkbox:@"Register kuri at system startup" identifier:@"register"];
-    self.autoStart = [self checkbox:@"Start the reverse proxy automatically" identifier:@"auto_start"];
-    [self addDescription:@"Starts the proxy when you open kuri, at system startup if registered, or when a connection reaches a registered proxy. Turn this off to start the proxy manually."];
+    NSStackView *sections = settingsStack(NSUserInterfaceLayoutOrientationVertical, 24);
+    addFullWidth(body, sections);
+    NSStackView *section = [self addSection:@"General" to:sections];
+    self.registration = [self checkbox:@"Register kuri at system startup" identifier:@"register" inSection:section];
+    self.autoStart = [self checkbox:@"Start the reverse proxy automatically" identifier:@"auto_start" inSection:section];
+    [self addDescription:@"Starts the proxy when you open kuri, at system startup if registered, or when a connection reaches a registered proxy. Turn this off to start the proxy manually."
+                      to:section];
 
-    [self addSection:@"Kubernetes"];
+    section = [self addSection:@"Kubernetes" to:sections];
     NSStackView *pathRow = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
-    [pathRow addArrangedSubview:[NSTextField labelWithString:@"Kubeconfig Path"]];
+    [pathRow addArrangedSubview:settingsItemLabel(@"Kubeconfig Path")];
     self.path = [NSTextField labelWithString:@""];
     self.path.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
     self.path.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [self.path setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [pathRow addArrangedSubview:self.path];
     [pathRow addArrangedSubview:[self button:@"Open..." action:@selector(openConfig:)]];
-    addFullWidth(body, pathRow);
-    [body addArrangedSubview:[NSTextField labelWithString:@"Contexts"]];
-    [self addDescription:@"The reverse proxy routes requests only to the Kubernetes contexts you enable here."];
+    addFullWidth(section, pathRow);
+    [section addArrangedSubview:settingsItemLabel(@"Contexts")];
+    [self addDescription:@"The reverse proxy routes requests only to the Kubernetes contexts you enable here." to:section];
     self.contextError = settingsLabel(@"", NSColor.systemRedColor);
     self.contextError.hidden = YES;
-    addFullWidth(body, self.contextError);
+    addFullWidth(section, self.contextError);
     NSStackView *contexts = nil;
     NSScrollView *contextScroll = settingsScroll(&contexts, 8, 3, NSBezelBorder);
     self.contexts = contexts;
     [contextScroll.heightAnchor constraintEqualToConstant:145].active = YES;
-    addFullWidth(body, contextScroll);
+    addFullWidth(section, contextScroll);
 
-    [self addSection:@"Server"];
-    [body addArrangedSubview:[NSTextField labelWithString:@"Host"]];
-    [self addDescription:@"If another service uses port 80, choose a different port. To keep using port 80, configure that service to forward requests to kuri's new port."];
-    [self field:@"Service Domain" identifier:@"domain" width:0 unit:nil];
-    [self field:@"Port" identifier:@"port" width:85 unit:nil];
+    section = [self addSection:@"Server" to:sections];
+    [section addArrangedSubview:settingsItemLabel(@"Host")];
+    [self addDescription:@"If another service uses port 80, choose a different port. To keep using port 80, configure that service to forward requests to kuri's new port."
+                      to:section];
+    [self field:@"Service Domain" identifier:@"domain" width:0 unit:nil inSection:section];
+    [self field:@"Port" identifier:@"port" width:85 unit:nil inSection:section];
     self.serverError = settingsLabel(@"", NSColor.systemRedColor);
     self.serverError.hidden = YES;
-    addFullWidth(body, self.serverError);
-    [body addArrangedSubview:[self button:@"Save Server Settings" action:@selector(saveServer:)]];
-    [body addArrangedSubview:[NSTextField labelWithString:@"Domain Styles"]];
+    addFullWidth(section, self.serverError);
+    [section addArrangedSubview:[self button:@"Save Server Settings" action:@selector(saveServer:)]];
+    [section addArrangedSubview:settingsItemLabel(@"Domain Styles")];
     for (NSString *style in @[@"explicit_context", @"explicit_port", @"current_context"]) {
-        NSButton *button = [self checkbox:@"" identifier:style];
+        NSButton *button = [self checkbox:@"" identifier:style inSection:section];
         self.styles[style] = button;
     }
 
-    [self addSection:@"Port Forwarding"];
-    [body addArrangedSubview:[NSTextField labelWithString:@"Keep-Alive"]];
-    [self addDescription:@"Keep the port forward open after the first request so later requests can connect faster."];
-    self.keepAlive = [self checkbox:@"Enable port forwarding keep-alive" identifier:@"keep_alive"];
-    [self field:@"Keep-alive duration" identifier:@"minutes" width:85 unit:@"minutes"];
-    NSStackView *timer = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
-    [timer addArrangedSubview:[NSTextField labelWithString:@"Start the keep-alive timer from"]];
+    section = [self addSection:@"Port Forwarding" to:sections];
+    [section addArrangedSubview:settingsItemLabel(@"Keep-Alive")];
+    [self addDescription:@"Keep the port forward open after the first request so later requests can connect faster." to:section];
+    self.keepAlive = [self checkbox:@"Enable port forwarding keep-alive" identifier:@"keep_alive" inSection:section];
+    [self field:@"Keep-alive duration" identifier:@"minutes" width:85 unit:@"minutes" inSection:section];
+    [section addArrangedSubview:settingsItemLabel(@"Start the keep-alive timer from")];
     self.trigger = [[[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO] autorelease];
     [self.trigger addItemsWithTitles:@[@"Last request", @"When the port forward opens"]];
     self.trigger.target = self;
     self.trigger.action = @selector(changeTrigger:);
     [self.trigger setAccessibilityLabel:@"Start the keep-alive timer from"];
     [self.controls addObject:self.trigger];
-    [timer addArrangedSubview:self.trigger];
-    [body addArrangedSubview:timer];
-    [body addArrangedSubview:[NSTextField labelWithString:@"Port Range"]];
-    [self addDescription:@"kuri uses ports in this range for port forwarding. If no port is available, kuri closes its oldest open port forward to make room for a new one, even when keep-alive is enabled."];
-    [self field:@"Min" identifier:@"min_port" width:85 unit:nil];
-    [self field:@"Max" identifier:@"max_port" width:85 unit:nil];
+    [section addArrangedSubview:self.trigger];
+    [section addArrangedSubview:settingsItemLabel(@"Port Range")];
+    [self addDescription:@"kuri uses ports in this range for port forwarding. If no port is available, kuri closes its oldest open port forward to make room for a new one, even when keep-alive is enabled."
+                      to:section];
+    [self field:@"Min" identifier:@"min_port" width:85 unit:nil inSection:section];
+    [self field:@"Max" identifier:@"max_port" width:85 unit:nil inSection:section];
     self.forwardError = settingsLabel(@"", NSColor.systemRedColor);
     self.forwardError.hidden = YES;
-    addFullWidth(body, self.forwardError);
-    [body addArrangedSubview:[self button:@"Save Port Forwarding Settings" action:@selector(saveForward:)]];
-    [self addSection:@"Logs"];
+    addFullWidth(section, self.forwardError);
+    [section addArrangedSubview:[self button:@"Save Port Forwarding Settings" action:@selector(saveForward:)]];
+    section = [self addSection:@"Logs" to:sections];
     NSStackView *logs = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 8);
     [logs addArrangedSubview:[NSButton buttonWithTitle:@"Show Logs" target:self action:@selector(showLogs:)]];
     [logs addArrangedSubview:[NSButton buttonWithTitle:@"Open Log Directory" target:self action:@selector(openLogDirectory:)]];
-    [body addArrangedSubview:logs];
-    [self addSection:@"Reset"];
-    [body addArrangedSubview:[self button:@"Reset Settings..." action:@selector(reset:)]];
+    [section addArrangedSubview:logs];
+    section = [self addSection:@"Reset" to:sections];
+    [section addArrangedSubview:[self button:@"Reset Settings..." action:@selector(reset:)]];
     [self updateControls];
 }
 
@@ -401,6 +427,7 @@ static NSString *settingsString(id value) {
     for (NSString *name in names) {
         NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
         NSTextField *title = settingsLabel(name, NSColor.labelColor);
+        title.font = settingsItemFont();
         title.lineBreakMode = NSLineBreakByCharWrapping;
         [row addArrangedSubview:title];
         NSSwitch *toggle = [[[NSSwitch alloc] initWithFrame:NSZeroRect] autorelease];
@@ -424,15 +451,19 @@ static NSString *settingsString(id value) {
     NSNumber *port = server[@"port"];
     NSString *suffix = port.integerValue == 80 ? [@"." stringByAppendingString:settingsString(server[@"domain"])] :
         [NSString stringWithFormat:@".%@:%@", settingsString(server[@"domain"]), settingsString(port)];
+    NSMutableParagraphStyle *paragraph = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    paragraph.lineBreakMode = NSLineBreakByTruncatingMiddle;
     for (NSString *key in self.styles) {
         NSButton *button = self.styles[key];
         NSString *label = [templates[key] stringByAppendingString:suffix];
         NSMutableAttributedString *title = [[[NSMutableAttributedString alloc] initWithString:label attributes:
-            @{NSForegroundColorAttributeName: NSColor.labelColor, NSFontAttributeName: button.font}] autorelease];
+            @{NSForegroundColorAttributeName: NSColor.labelColor, NSFontAttributeName: button.font,
+              NSParagraphStyleAttributeName: paragraph}] autorelease];
         [title addAttribute:NSForegroundColorAttributeName value:NSColor.secondaryLabelColor
             range:NSMakeRange(0, [templates[key] length])];
         button.attributedTitle = title;
         [button setAccessibilityLabel:label];
+        button.toolTip = label;
         button.state = [server[@"domain_styles"][key] boolValue];
     }
 }
