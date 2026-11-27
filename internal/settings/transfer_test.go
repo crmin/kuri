@@ -151,6 +151,10 @@ func TestImportLocalSettingsUsesSourceAliasProfile(t *testing.T) {
 	if err != nil || portable.Kubernetes == nil || portable.Kubernetes.Aliases["dev"] != "portable" {
 		t.Fatalf("portable aliases with an extra field: %+v, %v", portable.Kubernetes, err)
 	}
+	normalized, err := DecodeTransfer(strings.NewReader("kubernetes: {config_path: /source/./current, context_aliases: {/source/current: {dev: source-dev}}}"), []string{"dev"})
+	if err != nil || normalized.Kubernetes == nil || normalized.Kubernetes.Aliases["dev"] != "source-dev" {
+		t.Fatalf("normalized source path: %+v, %v", normalized.Kubernetes, err)
+	}
 }
 
 func TestExportRefusesActiveSettingsPath(t *testing.T) {

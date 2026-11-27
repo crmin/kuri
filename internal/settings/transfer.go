@@ -185,7 +185,7 @@ func transferAliasMapping(aliases, sourcePath *yaml.Node) (map[string]*yaml.Node
 		if sourcePath.Kind != yaml.ScalarNode || sourcePath.Tag != "!!str" {
 			return nil, errTransferFormat
 		}
-		if profile := values[sourcePath.Value]; profile != nil {
+		if profile := values[filepath.Clean(sourcePath.Value)]; profile != nil {
 			return transferMapping(profile)
 		}
 		return nil, nil
