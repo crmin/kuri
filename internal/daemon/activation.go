@@ -52,15 +52,7 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 		if !allowAutonomous || suppressed {
 			return false
 		}
-		var allowed bool
-		err := store.WithSnapshot(ctx, func(cfg settings.Config) error {
-			if !cfg.General.AutoStart {
-				return nil
-			}
-			var err error
-			allowed, err = store.PassiveStartAllowedLocked()
-			return err
-		})
+		allowed, err := store.PassiveStartAllowed(ctx)
 		return err == nil && allowed
 	}
 	eager = eager && !controlRequestQueued(sockets.Control) && allowPassive()

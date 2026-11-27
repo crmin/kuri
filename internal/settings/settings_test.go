@@ -32,6 +32,32 @@ func TestProxyPauseExpiresAtNextBoot(t *testing.T) {
 	}
 }
 
+func TestPausedPassiveStartSkipsSettingsRead(t *testing.T) {
+	boot, err := bootSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boot == "" {
+		t.Skip("requires a boot session")
+	}
+	store := NewStore(t.TempDir())
+	if err := store.SetProxyPaused(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.Path(), []byte("general: ["), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := store.PassiveStartAllowed(t.Context()); allowed || err != nil {
+		t.Fatalf("paused registration read settings: allowed=%v, err=%v", allowed, err)
+	}
+	if err := store.SetProxyPaused(t.Context(), false); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := store.PassiveStartAllowed(t.Context()); allowed || err == nil {
+		t.Fatalf("resumed registration did not read settings: allowed=%v, err=%v", allowed, err)
+	}
+}
+
 func TestSettingsCreatesDefaultsOnFirstLaunch(t *testing.T) {
 	home := t.TempDir()
 	store := NewStore(home)

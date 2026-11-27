@@ -12,6 +12,25 @@ import (
 
 const proxyPauseFile = "proxy-paused"
 
+// PassiveStartAllowed checks the pause record before loading settings. A
+// paused registration can reject connections without parsing the YAML.
+func (s Store) PassiveStartAllowed(ctx context.Context) (bool, error) {
+	lock, err := s.lock(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	allowed, err := s.PassiveStartAllowedLocked()
+	if err != nil || !allowed {
+		return false, err
+	}
+	cfg, err := s.Read()
+	return err == nil && cfg.General.AutoStart, err
+}
+
 // SetProxyPaused serializes an intentional stop with passive proxy startup.
 func (s Store) SetProxyPaused(ctx context.Context, paused bool) error {
 	boot, err := bootSession()
