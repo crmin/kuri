@@ -89,7 +89,8 @@ static NSString *settingsString(id value) {
     return @"";
 }
 
-@interface KuriSettings ()
+@interface KuriSettings () <NSToolbarDelegate>
+@property(nonatomic, retain) NSTabView *tabs;
 @property(nonatomic, retain) NSStackView *contexts;
 @property(nonatomic, retain) NSTextField *path;
 @property(nonatomic, retain) NSTextField *problem;
@@ -225,9 +226,8 @@ static NSString *settingsString(id value) {
 }
 
 - (void)build {
-    NSStackView *body = nil;
-    NSScrollView *scroll = settingsScroll(&body, 24, 9, NSNoBorder);
-    [self.window setContentView:scroll];
+    NSStackView *body = settingsStack(NSUserInterfaceLayoutOrientationVertical, 4);
+    self.window.contentView = body;
     self.problem = settingsLabel(@"", NSColor.systemRedColor);
     self.problem.hidden = YES;
     addFullWidth(body, self.problem);
@@ -235,8 +235,18 @@ static NSString *settingsString(id value) {
     self.retry.hidden = YES;
     [body addArrangedSubview:self.retry];
 
-    NSStackView *sections = settingsStack(NSUserInterfaceLayoutOrientationVertical, 24);
-    addFullWidth(body, sections);
+    self.tabs = [[[NSTabView alloc] initWithFrame:NSZeroRect] autorelease];
+    self.tabs.tabViewType = NSNoTabsNoBorder;
+    self.tabs.drawsBackground = NO;
+    addFullWidth(body, self.tabs);
+    NSToolbar *toolbar = [[[NSToolbar alloc] initWithIdentifier:@"KuriSettingsTabs"] autorelease];
+    toolbar.delegate = self;
+    toolbar.displayMode = NSToolbarDisplayModeIconAndLabel;
+    self.window.toolbarStyle = NSWindowToolbarStylePreference;
+    self.window.toolbar = toolbar;
+    self.window.autorecalculatesKeyViewLoop = YES;
+
+    NSStackView *sections = [self addTab:@"General"];
     NSStackView *section = [self addSection:@"General" to:sections];
     [self addLoginItemToSection:section];
     self.autoStart = [self checkbox:@"Start the reverse proxy when kuri opens" identifier:@"auto_start" inSection:section];
@@ -265,6 +275,7 @@ static NSString *settingsString(id value) {
     [contextScroll.heightAnchor constraintEqualToConstant:145].active = YES;
     addFullWidth(section, contextScroll);
 
+    sections = [self addTab:@"Network"];
     section = [self addSection:@"Server" to:sections];
     [section addArrangedSubview:settingsItemLabel(@"Host")];
     [self addDescription:@"If another service uses port 80, choose a different port. To keep using port 80, configure that service to forward requests to kuri's new port."
@@ -275,6 +286,7 @@ static NSString *settingsString(id value) {
     self.serverError.hidden = YES;
     addFullWidth(section, self.serverError);
     [section addArrangedSubview:[self button:@"Save Server Settings" action:@selector(saveServer:)]];
+    [section setCustomSpacing:18 afterView:section.arrangedSubviews.lastObject];
     [section addArrangedSubview:settingsItemLabel(@"Domain Styles")];
     for (NSString *style in @[@"explicit_context", @"explicit_port", @"current_context"]) {
         NSButton *button = [self checkbox:@"" identifier:style inSection:section];
@@ -294,6 +306,7 @@ static NSString *settingsString(id value) {
     [self.trigger setAccessibilityLabel:@"Start the keep-alive timer from"];
     [self.controls addObject:self.trigger];
     [section addArrangedSubview:self.trigger];
+    [section setCustomSpacing:18 afterView:self.trigger];
     [section addArrangedSubview:settingsItemLabel(@"Port Range")];
     [self addDescription:@"kuri uses ports in this range for port forwarding. If no port is available, kuri closes its oldest open port forward to make room for a new one, even when keep-alive is enabled."
                       to:section];
@@ -303,6 +316,8 @@ static NSString *settingsString(id value) {
     self.forwardError.hidden = YES;
     addFullWidth(section, self.forwardError);
     [section addArrangedSubview:[self button:@"Save Port Forwarding Settings" action:@selector(saveForward:)]];
+    sections = [self addTab:@"About"];
+    [self addAppInfoTo:sections];
     section = [self addSection:@"Logs" to:sections];
     NSStackView *logs = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 8);
     [logs addArrangedSubview:[NSButton buttonWithTitle:@"Show Logs" target:self action:@selector(showLogs:)]];
@@ -310,7 +325,73 @@ static NSString *settingsString(id value) {
     [section addArrangedSubview:logs];
     section = [self addSection:@"Reset" to:sections];
     [section addArrangedSubview:[self button:@"Reset Settings..." action:@selector(reset:)]];
+    [self selectTab:@"General"];
     [self updateControls];
+}
+
+- (NSStackView *)addTab:(NSString *)title {
+    NSStackView *sections = nil;
+    NSTabViewItem *item = [[[NSTabViewItem alloc] initWithIdentifier:title] autorelease];
+    item.label = title;
+    item.view = settingsScroll(&sections, 24, 24, NSNoBorder);
+    [self.tabs addTabViewItem:item];
+    return sections;
+}
+
+- (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
+    return @[@"General", @"Network", @"About"];
+}
+
+- (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar { return [self toolbarAllowedItemIdentifiers:toolbar]; }
+- (NSArray *)toolbarSelectableItemIdentifiers:(NSToolbar *)toolbar { return [self toolbarAllowedItemIdentifiers:toolbar]; }
+
+- (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSString *)identifier
+    willBeInsertedIntoToolbar:(BOOL)inserted {
+    NSString *symbol = @{@"General": @"gearshape", @"Network": @"network", @"About": @"info.circle"}[identifier];
+    NSToolbarItem *item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+    item.label = identifier;
+    item.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:identifier];
+    item.target = self;
+    item.action = @selector(changeTab:);
+    return item;
+}
+
+- (void)changeTab:(NSToolbarItem *)item { [self selectTab:item.itemIdentifier]; }
+
+- (void)selectTab:(NSString *)identifier {
+    [self.tabs selectTabViewItemWithIdentifier:identifier];
+    self.window.toolbar.selectedItemIdentifier = identifier;
+}
+
+- (void)addAppInfoTo:(NSStackView *)sections {
+    NSBundle *bundle = NSBundle.mainBundle;
+    NSString *name = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"kuri";
+    NSString *version = [bundle objectForInfoDictionaryKey:@"KuriVersion"];
+    NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 24);
+    row.alignment = NSLayoutAttributeTop;
+    NSImageView *icon = [NSImageView imageViewWithImage:NSApp.applicationIconImage];
+    icon.imageScaling = NSImageScaleProportionallyUpOrDown;
+    [icon.widthAnchor constraintEqualToConstant:96].active = YES;
+    [icon.heightAnchor constraintEqualToConstant:96].active = YES;
+    [row addArrangedSubview:icon];
+    NSStackView *info = settingsStack(NSUserInterfaceLayoutOrientationVertical, 6);
+    NSTextField *appName = settingsItemLabel(name);
+    appName.font = [NSFont boldSystemFontOfSize:17];
+    [info addArrangedSubview:appName];
+    if (version.length) {
+        [info addArrangedSubview:settingsLabel([@"Version " stringByAppendingString:version], NSColor.secondaryLabelColor)];
+    }
+    NSButton *repository = [NSButton buttonWithTitle:@"Repository" target:self action:@selector(openRepository:)];
+    repository.bordered = NO;
+    repository.attributedTitle = [[[NSAttributedString alloc] initWithString:@"Repository"
+        attributes:@{NSForegroundColorAttributeName: NSColor.linkColor}] autorelease];
+    [info addArrangedSubview:repository];
+    [row addArrangedSubview:info];
+    addFullWidth(sections, row);
+}
+
+- (void)openRepository:(id)sender {
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/crmin/kuri"]];
 }
 
 - (void)submit:(NSDictionary *)edit {
@@ -435,7 +516,10 @@ static NSString *settingsString(id value) {
     self.busy = NO;
     self.pending = nil;
     [self updateControls];
-    if (portError.length) [self reveal:self.serverError];
+    if (portError.length || (error.length && !saved && (hostEdit || forwardEdit))) {
+        [self selectTab:@"Network"];
+        [self reveal:(hostEdit || portError.length) ? self.serverError : self.forwardError];
+    }
     if (self.closeAfterSave) {
         BOOL quit = self.quitAfterSave;
         self.closeAfterSave = NO;

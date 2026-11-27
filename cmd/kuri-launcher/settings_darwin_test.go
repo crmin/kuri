@@ -57,6 +57,12 @@ func TestSettingsCloseShortcut(t *testing.T) {
 	}
 }
 
+func TestSettingsTabsAndAbout(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "tabs"))); got != "General Network About" {
+		t.Fatalf("settings tabs: %q", got)
+	}
+}
+
 func TestSettingsDomainStyleLabel(t *testing.T) {
 	output := strings.TrimSpace(string(settingsFixtureOutput(t, "style-labels")))
 	lines := strings.Split(output, "\n")

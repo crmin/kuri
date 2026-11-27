@@ -73,6 +73,19 @@ static void renderStyleLabels(KuriSettings *settings) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         KuriSettings *settings = [[[KuriSettings alloc] initWithWindow:nil] autorelease];
+        if (argc == 2 && strcmp(argv[1], "tabs") == 0) {
+            [NSApplication sharedApplication];
+            settings = [[[KuriSettings alloc] init] autorelease];
+            NSTabView *tabs = [settings valueForKey:@"tabs"];
+            if (tabs.numberOfTabViewItems != 3 || !settings.window.toolbar) abort();
+            NSMutableArray *titles = [NSMutableArray array];
+            for (NSTabViewItem *tab in tabs.tabViewItems) {
+                if (![tab.view isKindOfClass:NSScrollView.class]) abort();
+                [titles addObject:tab.label];
+            }
+            puts([titles componentsJoinedByString:@" "].UTF8String);
+            return 0;
+        }
         if (argc == 2 && strcmp(argv[1], "shortcuts") == 0) {
             [NSApplication sharedApplication];
             if (!kuriCommandKey(keyEvent(@"\u3148", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
