@@ -1,6 +1,7 @@
 //go:build cgo
 
 #import "settings_darwin.h"
+#import "bookmarks_darwin.h"
 #import "shortcuts_darwin.h"
 #import <ServiceManagement/ServiceManagement.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -92,6 +93,7 @@ static NSString *settingsString(id value) {
 
 @interface KuriSettings () <NSToolbarDelegate>
 @property(nonatomic, retain) NSTabView *tabs;
+@property(nonatomic, retain) KuriBookmarkSettings *bookmarks;
 @property(nonatomic, retain) NSStackView *contexts;
 @property(nonatomic, retain) NSTextField *path;
 @property(nonatomic, retain) NSTextField *problem;
@@ -161,6 +163,7 @@ static NSString *settingsString(id value) {
         self.serverError.hidden = YES;
         self.forwardError.hidden = YES;
         [self submit:nil];
+        if ([self.tabs.selectedTabViewItem.identifier isEqual:@"Bookmark"]) [self.bookmarks reload];
     }
     [self.window makeKeyAndOrderFront:nil];
 }
@@ -293,6 +296,10 @@ static NSString *settingsString(id value) {
     [contextScroll.heightAnchor constraintEqualToConstant:145].active = YES;
     addFullWidth(section, contextScroll);
 
+    sections = [self addTab:@"Bookmark"];
+    self.bookmarks = [[[KuriBookmarkSettings alloc] initWithSettings:self] autorelease];
+    addFullWidth(sections, self.bookmarks.view);
+
     sections = [self addTab:@"Network"];
     section = [self addSection:@"Server" to:sections];
     [section addArrangedSubview:settingsItemLabel(@"Host")];
@@ -367,7 +374,7 @@ static NSString *settingsString(id value) {
 }
 
 - (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
-    return @[@"General", @"Network", @"About"];
+    return @[@"General", @"Bookmark", @"Network", @"About"];
 }
 
 - (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar { return [self toolbarAllowedItemIdentifiers:toolbar]; }
@@ -375,7 +382,8 @@ static NSString *settingsString(id value) {
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSString *)identifier
     willBeInsertedIntoToolbar:(BOOL)inserted {
-    NSString *symbol = @{@"General": @"gearshape", @"Network": @"network", @"About": @"info.circle"}[identifier];
+    NSString *symbol = @{@"General": @"gearshape", @"Bookmark": @"bookmark", @"Network": @"network",
+        @"About": @"info.circle"}[identifier];
     NSToolbarItem *item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
     item.label = identifier;
     item.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:identifier];
@@ -389,6 +397,7 @@ static NSString *settingsString(id value) {
 - (void)selectTab:(NSString *)identifier {
     [self.tabs selectTabViewItemWithIdentifier:identifier];
     self.window.toolbar.selectedItemIdentifier = identifier;
+    if ([identifier isEqualToString:@"Bookmark"]) [self.bookmarks reload];
 }
 
 - (void)addAppInfoTo:(NSStackView *)sections {
@@ -423,7 +432,7 @@ static NSString *settingsString(id value) {
 }
 
 - (void)submit:(NSDictionary *)edit {
-    if (self.busy) return;
+    if (self.busy || self.bookmarks.saving) return;
     self.pending = edit;
     self.busy = YES;
     [self updateControls];
@@ -457,6 +466,7 @@ static NSString *settingsString(id value) {
     }
     self.aliasSave.enabled = !self.busy;
     self.transferConfirm.enabled = !self.busy && [self selectedTransferFields].count > 0;
+    [self.bookmarks setAvailable:!self.busy && !self.dialog && !self.window.attachedSheet];
 }
 
 - (NSDictionary *)draft {
@@ -557,6 +567,7 @@ static NSString *settingsString(id value) {
     self.busy = NO;
     self.pending = nil;
     [self updateControls];
+    if (saved) [[NSNotificationCenter defaultCenter] postNotificationName:KuriBookmarksDidChange object:nil];
     if (pending[@"context_aliases"] && self.aliasTarget) {
         if (saved) {
             [self closeDialog:nil];
@@ -691,7 +702,8 @@ static NSString *settingsString(id value) {
 }
 
 - (void)closeDialog:(id)sender {
-    if (!self.dialog || self.busy) return;
+    if (!self.dialog || self.busy || self.bookmarks.saving) return;
+    [self.bookmarks endEditing];
     [self.window removeChildWindow:self.dialog];
     [self.dialog orderOut:nil];
     self.dialog.delegate = nil;
@@ -708,6 +720,8 @@ static NSString *settingsString(id value) {
     [self updateControls];
     [self.window makeKeyAndOrderFront:nil];
 }
+
+- (void)submitBookmark:(id)sender { [self.bookmarks addItem]; }
 
 static NSArray *settingsTransferGroups(void) {
     return @[
@@ -1000,8 +1014,8 @@ static NSArray *settingsTransferGroups(void) {
 
 - (void)reset:(id)sender {
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    alert.messageText = @"Reset all settings?";
-    alert.informativeText = @"This will restore all saved settings to their defaults. This action can't be undone.";
+    alert.messageText = @"Reset kuri settings?";
+    alert.informativeText = @"Restore the default settings and keep your bookmarks. This action can't be undone.";
     [alert addButtonWithTitle:@"Continue"];
     [alert addButtonWithTitle:@"Cancel"].keyEquivalent = @"\e";
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
