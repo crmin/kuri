@@ -104,6 +104,13 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stdout, "1")
 	case len(args) == 1 && args[0] == "__settings_get":
 		err = json.NewEncoder(os.Stdout).Encode(loadSettingsView(ctx, home, app))
+	case len(args) == 1 && args[0] == "__settings_transfer":
+		var request settingsTransferRequest
+		decoder := json.NewDecoder(io.LimitReader(os.Stdin, 4<<20))
+		decoder.DisallowUnknownFields()
+		if err = decoder.Decode(&request); err == nil {
+			err = json.NewEncoder(os.Stdout).Encode(handleSettingsTransfer(ctx, app, home, request))
+		}
 	case len(args) == 1 && args[0] == "__settings_apply":
 		var edit settings.Edit
 		decoder := json.NewDecoder(io.LimitReader(os.Stdin, 1<<20))

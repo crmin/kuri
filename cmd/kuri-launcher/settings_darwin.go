@@ -24,6 +24,12 @@ func kuriGoSettingsRequest(edit *C.char) {
 	if edit != nil {
 		command = "__settings_apply"
 		input = []byte(C.GoString(edit))
+		var transfer struct {
+			Operation string `json:"transfer_operation"`
+		}
+		if json.Unmarshal(input, &transfer) == nil && transfer.Operation != "" {
+			command = "__settings_transfer"
+		}
 	}
 	go func() {
 		timeout := 10 * time.Second

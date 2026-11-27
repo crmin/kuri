@@ -68,6 +68,9 @@ func updateSettings(ctx context.Context, app settingsServer, home string, edit s
 	if edit.Reset {
 		desired = settings.Defaults(home)
 	}
+	if edit.ContextAliases != nil && edit.ContextAliases.ConfigPath != desired.Kubernetes.ConfigPath {
+		return settingsResult{err: errKubeconfigChanged}
+	}
 	if err := edit.Apply(&desired); err != nil {
 		return settingsResult{err: err}
 	}
@@ -112,7 +115,8 @@ func updateSettings(ctx context.Context, app settingsServer, home string, edit s
 	if err != nil {
 		return settingsResult{err: err}
 	}
-	explicitPort := edit.Port != nil || edit.Reset || edit == (settings.Edit{})
+	explicitPort := edit.Port != nil || (edit.Transfer != nil && edit.Transfer.Server != nil && edit.Transfer.Server.Port != nil) ||
+		edit.Reset || edit == (settings.Edit{})
 	generalOnly := !explicitPort && edit.AutoStart != nil &&
 		before.ProxyFingerprint() == saved.ProxyFingerprint()
 	if generalOnly {

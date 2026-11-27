@@ -3,7 +3,7 @@
 package main
 
 /*
-#cgo LDFLAGS: -framework AppKit -framework ServiceManagement
+#cgo LDFLAGS: -framework AppKit -framework ServiceManagement -framework UniformTypeIdentifiers
 #include <stdlib.h>
 #include "statusitem_darwin.h"
 */

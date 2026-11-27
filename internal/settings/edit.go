@@ -7,6 +7,7 @@ import (
 )
 
 type Edit struct {
+	Transfer       *Transfer         `json:"transfer,omitempty"`
 	AutoStart      *bool             `json:"auto_start,omitempty"`
 	PrepareProxy   bool              `json:"prepare_proxy,omitempty"`
 	Register       *bool             `json:"register,omitempty"`
@@ -43,6 +44,9 @@ type StyleEdit struct {
 }
 
 func (e Edit) Apply(c *Config) error {
+	if e.Transfer != nil {
+		e.Transfer.Apply(c)
+	}
 	if e.AutoStart != nil {
 		c.General.AutoStart = *e.AutoStart
 	}

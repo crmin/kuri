@@ -31,9 +31,9 @@ Finder에서 앱이 시작되지 않으면 `~/Library/Logs/kuri/startup.log`에�
 - **Open at Login** 옆의 **Open System Settings**를 누릅니다. macOS의 **Open at Login** 목록에서 `+`를 누르고 kuri를 선택한 뒤 **Add**를 누릅니다.
 - **Start the reverse proxy when kuri opens**를 켜면 로그인 시 자동으로 앱이 열릴 때도 프록시가 시작됩니다. 이 옵션을 끄면 앱만 열립니다. 필요할 때 메뉴의 **Start**나 `kuri start`로 프록시를 켤 수 있습니다.
 - 앱에서 설치한 이전 등록은 General의 **Update Proxy Registration**으로 갱신합니다. 수신 포트 변경이 적용 대기 중이면 먼저 포트 설정을 적용합니다. macOS가 관리자 인증을 요청할 수 있습니다. 독립 CLI 등록은 새 바이너리를 빌드한 디렉터리에서 `./kuri install`을 다시 실행해 갱신합니다.
-- **Kubernetes**에서 kubeconfig 파일을 열고 라우팅할 컨텍스트를 선택합니다. 파일을 바꾸면 새 파일의 모든 컨텍스트가 켜집니다.
-- **Server**와 **Port Forwarding**에서 도메인, 포트, Keep-Alive와 포트 범위를 설정합니다. 저장한 값은 실행 중인 프록시에 바로 적용됩니다. 수신 포트를 변경하면 프록시가 자동으로 재시작합니다. 포트 변경에 실패하면 저장된 포트를 이전 값으로 되돌립니다. 입력값은 그대로 두고 `Save Server Settings` 위에 오류를 표시합니다.
-- **Logs**에서 접근 로그를 열 수 있습니다. **Reset**은 확인 후 기본값을 다시 저장합니다.
+- **General**의 **Kubernetes**에서 kubeconfig를 열고 라우팅할 컨텍스트를 선택합니다. 컨텍스트 옆 말줄임표를 눌러 별칭을 저장합니다. 별칭은 kubeconfig 파일별로 저장됩니다. `aws-dev`의 별칭이 `dev`이면 `api.default.dev.kuri.localhost`로 접속합니다.
+- **Network**에서 도메인, 포트, Keep-Alive, Auto Healing과 포트 범위를 설정합니다. Auto Healing의 기본 검사 주기는 10초입니다. 이 기능을 끄면 주기 검사와 자동 복구를 중단합니다. 저장한 값은 실행 중인 프록시에 적용합니다. 수신 포트 변경에 실패하면 저장된 포트를 이전 값으로 복구합니다.
+- **About**에서 **Import settings**와 **Export settings**로 선택한 설정을 YAML로 옮깁니다. 내보내기 파일에는 현재 kubeconfig의 별칭을 `컨텍스트 이름: 별칭` 형식으로 담을 수 있습니다. 가져온 별칭은 현재 kubeconfig에 같은 이름의 컨텍스트가 있을 때만 적용합니다. **Logs**에서 접근 로그를 열고 **Reset**에서 설정을 초기화할 수 있습니다.
 
 YAML 파일을 직접 편집한 값은 다음 실행 때 적용됩니다.
 

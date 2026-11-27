@@ -12,6 +12,18 @@
 - (void)saveServer:(id)sender;
 - (void)saveForward:(id)sender;
 - (void)renderStyles:(NSDictionary *)server;
+- (void)openTransferDialog:(BOOL)importing;
+- (NSArray *)selectedTransferFields;
+- (void)selectAllTransfer:(id)sender;
+- (void)deselectAllTransfer:(id)sender;
+- (void)closeDialog:(id)sender;
+@end
+
+@interface TransferFixtureSettings : KuriSettings
+@end
+
+@implementation TransferFixtureSettings
+- (void)showDialog {}
 @end
 
 @interface FixtureControl : NSObject
@@ -73,6 +85,22 @@ static void renderStyleLabels(KuriSettings *settings) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         KuriSettings *settings = [[[KuriSettings alloc] initWithWindow:nil] autorelease];
+        if (argc == 2 && strcmp(argv[1], "transfer") == 0) {
+            [NSApplication sharedApplication];
+            settings = [[[TransferFixtureSettings alloc] init] autorelease];
+            [settings openTransferDialog:NO];
+            if (settings.selectedTransferFields.count != 10) abort();
+            [settings deselectAllTransfer:nil];
+            if (settings.selectedTransferFields.count != 0 || [[settings valueForKey:@"transferConfirm"] isEnabled]) abort();
+            [settings closeDialog:nil];
+            [settings setValue:@{@"fields": @[@"context_aliases", @"port"]} forKey:@"transferPreview"];
+            [settings openTransferDialog:YES];
+            [settings deselectAllTransfer:nil];
+            [settings selectAllTransfer:nil];
+            if (![[NSSet setWithArray:settings.selectedTransferFields] isEqual:[NSSet setWithArray:@[@"port", @"context_aliases"]]]) abort();
+            puts("ok");
+            return 0;
+        }
         if (argc == 2 && strcmp(argv[1], "tabs") == 0) {
             [NSApplication sharedApplication];
             settings = [[[KuriSettings alloc] init] autorelease];

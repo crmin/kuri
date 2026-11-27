@@ -28,7 +28,7 @@ func settingsFixtureOutput(t *testing.T, args ...string) []byte {
 		t.Fatal(err)
 	}
 	fixture := filepath.Join(dir, "settings_payload")
-	command := exec.CommandContext(t.Context(), "xcrun", "clang", "-framework", "AppKit", "-framework", "ServiceManagement", "-I", ".", source, "settings_darwin.m", "-o", fixture)
+	command := exec.CommandContext(t.Context(), "xcrun", "clang", "-framework", "AppKit", "-framework", "ServiceManagement", "-framework", "UniformTypeIdentifiers", "-I", ".", source, "settings_darwin.m", "-o", fixture)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("compile settings fixture: %v\n%s", err, output)
 	}
@@ -60,6 +60,12 @@ func TestSettingsCloseShortcut(t *testing.T) {
 func TestSettingsTabsAndAbout(t *testing.T) {
 	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "tabs"))); got != "General Network About" {
 		t.Fatalf("settings tabs: %q", got)
+	}
+}
+
+func TestSettingsTransferSelection(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "transfer"))); got != "ok" {
+		t.Fatalf("settings transfer: %q", got)
 	}
 }
 
