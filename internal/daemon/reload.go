@@ -56,8 +56,14 @@ func (r *proxyRuntime) openBackend(cfg settings.Config, previous *proxyBackend, 
 		var err error
 		kube, _, err = forward.LoadKubernetes(cfg.Kubernetes.ConfigPath)
 		if err != nil {
+			if cfg.PendingKubeconfigFingerprint() != "" {
+				return nil, errors.Join(ErrKubeconfigChanged, err)
+			}
 			return nil, err
 		}
+	}
+	if expected := cfg.PendingKubeconfigFingerprint(); expected != "" && kube.Fingerprint() != expected {
+		return nil, ErrKubeconfigChanged
 	}
 	if err := kube.StartCredentials(settings.NewStore(r.home).Directory(), r.retained); err != nil {
 		return nil, err
@@ -73,6 +79,7 @@ func (r *proxyRuntime) openBackend(cfg settings.Config, previous *proxyBackend, 
 }
 
 func (r *proxyRuntime) install(cfg settings.Config) {
+	cfg.PendingKubeconfigs = nil
 	routes := r.current.kube.Routes(cfg.Server, cfg.Kubernetes.ExcludedContexts, cfg.Kubernetes.Aliases())
 	r.current.manager.UpdatePolicy(cfg.PortForward, routes.Enabled, routes)
 	r.config = cfg
@@ -142,13 +149,19 @@ func (r *proxyRuntime) apply(ctx context.Context, fingerprint string, retainPort
 		}
 	}()
 	var kube *forward.Kubernetes
-	if kubeconfigFingerprint != "" || len(cfg.Kubernetes.Aliases()) > 0 || len(original.Kubernetes.Aliases()) > 0 {
+	if expected := cfg.PendingKubeconfigFingerprint(); expected != "" {
+		if kubeconfigFingerprint != "" && kubeconfigFingerprint != expected {
+			return ErrKubeconfigChanged
+		}
+		kubeconfigFingerprint = expected
+	}
+	if kubeconfigFingerprint != "" {
 		kube, _, err = forward.LoadKubernetes(cfg.Kubernetes.ConfigPath)
 		if err != nil {
-			return err
+			return errors.Join(ErrKubeconfigChanged, err)
 		}
-		if kubeconfigFingerprint != "" && kube.Fingerprint() != kubeconfigFingerprint {
-			return errors.New("The kubeconfig changed before settings could be applied.")
+		if kube.Fingerprint() != kubeconfigFingerprint {
+			return ErrKubeconfigChanged
 		}
 	}
 	if cfg.Kubernetes.ConfigPath != original.Kubernetes.ConfigPath || (kube != nil && kube.Fingerprint() != previous.kube.Fingerprint()) {

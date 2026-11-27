@@ -51,9 +51,12 @@ func loadSettingsView(ctx context.Context, home string, app settingsServer) sett
 		view.KubeconfigFingerprint = kube.Fingerprint()
 	}
 	if view.FileError == "" {
-		if state, err := app.State(ctx); err == nil && state.PID != 0 &&
-			(state.ProxyFingerprint != view.Config.ProxyFingerprint() ||
-				(len(view.Config.Kubernetes.Aliases()) > 0 && view.KubeconfigFingerprint != state.KubeconfigFingerprint)) {
+		expectedKubeconfig := view.Config.PendingKubeconfigFingerprint()
+		if expectedKubeconfig == "" && len(view.Config.Kubernetes.Aliases()) > 0 {
+			expectedKubeconfig = view.KubeconfigFingerprint
+		}
+		if state, err := app.State(ctx); err == nil && state.PID != 0 && (state.ProxyFingerprint != view.Config.ProxyFingerprint() ||
+			(expectedKubeconfig != "" && expectedKubeconfig != state.KubeconfigFingerprint)) {
 			view.ApplyPending = true
 			view.RuntimeWarning = "The reverse proxy has settings waiting to be applied."
 			if state.ProxyFingerprint == "" {

@@ -548,7 +548,7 @@ static NSString *settingsString(id value) {
         self.problem.toolTip = error;
         self.retry.hidden = NO;
     } else {
-        self.retry.hidden = ![response[@"apply_pending"] boolValue] || portError.length || ![notice isEqual:response[@"runtime_warning"]];
+        self.retry.hidden = ![response[@"apply_pending"] boolValue] || (!portError.length && ![notice isEqual:response[@"runtime_warning"]]);
         self.problem.toolTip = notice;
     }
     self.problem.stringValue = notice ?: @"";

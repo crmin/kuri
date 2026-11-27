@@ -119,6 +119,23 @@ users:
 	}
 	checkHost("api.default.fresh.example.com", http.StatusBadGateway)
 	checkHost("api.default.new-context.example.com", http.StatusBadRequest)
+	if err := os.WriteFile(cfg.Kubernetes.ConfigPath, []byte(strings.Replace(modified, "127.0.0.1:1", "127.0.0.1:2", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, updated, err = store.Update(ctx, func(c *settings.Config) error {
+		c.PortForward.KeepAlive = false
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = app.ApplySettings(ctx, state, updated.Fingerprint(), false)
+	if err != nil || state.KubeconfigFingerprint != kube.Fingerprint() {
+		t.Fatalf("policy change reloaded the kubeconfig: %+v, %v", state, err)
+	}
+	if err := os.Remove(cfg.Kubernetes.ConfigPath); err != nil {
+		t.Fatal(err)
+	}
 	_, updated, err = store.Update(ctx, func(c *settings.Config) error {
 		c.Kubernetes.ExcludedContexts = []string{"dev"}
 		return nil
@@ -136,6 +153,61 @@ users:
 	}
 	if _, err := os.Stat(filepath.Join(app.home, ".kuri", "access.log")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGuardedPortRestartChecksKubeconfigBeforePublishing(t *testing.T) {
+	app := testApp(t)
+	store := settings.NewStore(app.home)
+	const original = `apiVersion: v1
+kind: Config
+clusters:
+- name: cluster
+  cluster: {server: 'http://127.0.0.1:1'}
+contexts:
+- name: dev
+  context: {cluster: cluster}
+`
+	path := settings.Defaults(app.home).Kubernetes.ConfigPath
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	kube, _, err := forward.LoadKubernetes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Update(t.Context(), func(c *settings.Config) error {
+		c.Server.Port = 38081
+		c.Kubernetes.MergeAliases(map[string]string{"dev": "imported"})
+		c.SetPendingKubeconfigFingerprint(kube.Fingerprint())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(original, "127.0.0.1:1", "127.0.0.1:2", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime, control, err := app.prepareRuntime(t.Context(), nil, nil); !errors.Is(err, ErrKubeconfigChanged) {
+		if err == nil {
+			control.Close()
+			runtime.close()
+		}
+		t.Fatalf("restart accepted a different kubeconfig: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(app.home, ".kuri", "ctl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unapproved startup published its control socket: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runtime, control, err := app.prepareRuntime(t.Context(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.close()
+	defer control.Close()
+	if state := runtime.state(State{}); state.KubeconfigFingerprint != kube.Fingerprint() || state.Port != 38081 {
+		t.Fatalf("approved runtime: %+v", state)
 	}
 }
 

@@ -93,7 +93,7 @@ func importSettings(ctx context.Context, app settingsServer, home string, store 
 		return settingsTransferReply{Error: "Select at least one available setting to import."}
 	}
 	result := updateSettings(ctx, app, home, edit)
-	if errors.Is(result.err, errKubeconfigChanged) || errors.Is(result.err, errKubeContextChanged) {
+	if !result.saved && (errors.Is(result.err, errKubeconfigChanged) || errors.Is(result.err, errKubeContextChanged)) {
 		return settingsTransferReply{Refresh: true}
 	}
 	if result.err != nil && !result.saved {

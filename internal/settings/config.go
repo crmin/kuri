@@ -20,6 +20,26 @@ type Config struct {
 	Kubernetes  Kubernetes  `yaml:"kubernetes" json:"kubernetes"`
 	Server      Server      `yaml:"server" json:"server"`
 	PortForward PortForward `yaml:"port_forward" json:"port_forward"`
+	// A combined alias and port save can restart the proxy in another process.
+	// Keep its approved kubeconfig identity until the listener is confirmed.
+	PendingKubeconfigs map[string]string `yaml:"pending_kubeconfig_fingerprints,omitempty" json:"pending_kubeconfig_fingerprints,omitempty"`
+}
+
+func (c Config) PendingKubeconfigFingerprint() string {
+	return c.PendingKubeconfigs[c.Kubernetes.ConfigPath]
+}
+
+func (c *Config) SetPendingKubeconfigFingerprint(fingerprint string) {
+	pending := maps.Clone(c.PendingKubeconfigs)
+	if fingerprint == "" {
+		delete(pending, c.Kubernetes.ConfigPath)
+	} else {
+		if pending == nil {
+			pending = make(map[string]string)
+		}
+		pending[c.Kubernetes.ConfigPath] = fingerprint
+	}
+	c.PendingKubeconfigs = pending
 }
 
 type General struct {
@@ -38,10 +58,6 @@ func (k Kubernetes) Aliases() map[string]string {
 }
 
 func (k *Kubernetes) MergeAliases(changes map[string]string) {
-	profiles := maps.Clone(k.ContextAliases)
-	if profiles == nil {
-		profiles = make(map[string]map[string]string)
-	}
 	aliases := maps.Clone(k.Aliases())
 	if aliases == nil {
 		aliases = make(map[string]string)
@@ -53,9 +69,17 @@ func (k *Kubernetes) MergeAliases(changes map[string]string) {
 			aliases[name] = alias
 		}
 	}
+	k.ReplaceAliases(aliases)
+}
+
+func (k *Kubernetes) ReplaceAliases(aliases map[string]string) {
+	profiles := maps.Clone(k.ContextAliases)
 	if len(aliases) == 0 {
 		delete(profiles, k.ConfigPath)
 	} else {
+		if profiles == nil {
+			profiles = make(map[string]map[string]string)
+		}
 		profiles[k.ConfigPath] = aliases
 	}
 	k.ContextAliases = profiles
@@ -76,7 +100,7 @@ type DomainStyles struct {
 const (
 	LastRequest           = "last_request"
 	ForwardOpened         = "forward_opened"
-	SettingsSchemaVersion = 2
+	SettingsSchemaVersion = 3
 	defaultCheckSeconds   = 10
 )
 
@@ -141,6 +165,12 @@ func (c *Config) Validate() error {
 	}
 	c.Server.Domain = domain
 	c.Kubernetes.ConfigPath = filepath.Clean(c.Kubernetes.ConfigPath)
+	for path, fingerprint := range c.PendingKubeconfigs {
+		if value, err := hex.DecodeString(fingerprint); err != nil || len(value) != sha256.Size ||
+			!filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return errors.New("Invalid pending kubeconfig fingerprint.")
+		}
+	}
 	if err := c.Kubernetes.validateAliases(); err != nil {
 		return err
 	}
@@ -208,6 +238,9 @@ func (f PortForward) CheckInterval() time.Duration {
 }
 
 func (c Config) RequiredSchemaVersion() int {
+	if len(c.PendingKubeconfigs) > 0 {
+		return 3
+	}
 	if len(c.Kubernetes.ContextAliases) > 0 {
 		return 2
 	}
@@ -223,6 +256,7 @@ func (c Config) Fingerprint() string {
 
 func (c Config) ProxyFingerprint() string {
 	c.General = General{}
+	c.PendingKubeconfigs = nil
 	if !c.PortForward.KeepAlive {
 		c.PortForward.Minutes = 0
 		c.PortForward.Trigger = ""

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/crmin/kuri/internal/daemon"
+	"github.com/crmin/kuri/internal/forward"
 	"github.com/crmin/kuri/internal/settings"
 )
 
@@ -70,5 +72,100 @@ func TestImportSelectedPortLifecycle(t *testing.T) {
 	if result.Settings == nil || result.Settings.PortError == "" || result.Settings.Config.Server.Port != cfg.Server.Port ||
 		result.Settings.Config.Server.Domain != "example.test" {
 		t.Fatalf("failed port change did not restore only the port: %+v", result.Settings)
+	}
+}
+
+func TestImportPortWithContextAliases(t *testing.T) {
+	for _, scenario := range []struct {
+		name          string
+		portOccupied  bool
+		changeAtApply int
+		wantAlias     string
+	}{
+		{"verified port switch", false, 0, "imported"},
+		{"port occupied with an unchanged kubeconfig", true, 0, "imported"},
+		{"kubeconfig changes during application", false, 1, "previous"},
+		{"kubeconfig changes during port recovery", true, 2, "previous"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			home := t.TempDir()
+			store := settings.NewStore(home)
+			kubePath := filepath.Join(home, "active-config")
+			writeKube := func(port int) error {
+				return os.WriteFile(kubePath, []byte(fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- name: cluster
+  cluster: {server: 'http://127.0.0.1:%d'}
+contexts:
+- name: dev
+  context: {cluster: cluster}
+`, port)), 0600)
+			}
+			if err := writeKube(1); err != nil {
+				t.Fatal(err)
+			}
+			_, initial, err := store.Update(t.Context(), func(c *settings.Config) error {
+				c.Kubernetes.ConfigPath = kubePath
+				c.Kubernetes.MergeAliases(map[string]string{"dev": "previous"})
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			kube, _, err := forward.LoadKubernetes(kubePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			approved := kube.Fingerprint()
+			const newPort = 16080
+			app := &testSettingsServer{store: store, state: daemon.State{
+				PID: 123, Port: initial.Server.Port, ProxyFingerprint: initial.ProxyFingerprint(),
+				SettingsSchema: settings.SettingsSchemaVersion, KubeconfigFingerprint: approved,
+			}}
+			if scenario.portOccupied {
+				app.blockedPort = newPort
+			}
+			attempts := 0
+			app.beforeApply = func(c settings.Config, expected string) error {
+				attempts++
+				if c.Kubernetes.Aliases()["dev"] != "imported" {
+					return nil
+				}
+				if index := attempts; index == scenario.changeAtApply {
+					if err := writeKube(2); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if expected != approved || c.PendingKubeconfigFingerprint() != approved {
+					t.Fatalf("applying the import without its approved identity: %q, %q", expected, c.PendingKubeconfigFingerprint())
+				}
+				loaded, _, err := forward.LoadKubernetes(kubePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if loaded.Fingerprint() != expected {
+					return daemon.ErrKubeconfigChanged
+				}
+				return nil
+			}
+			req := settingsTransferRequest{Operation: "import", KubeconfigPath: kubePath, KubeconfigFingerprint: approved,
+				Fields: []settings.TransferField{settings.TransferPort, settings.TransferDomain, settings.TransferAliases},
+				Transfer: &settings.Transfer{Server: &settings.TransferServer{Port: new(newPort), Domain: new("example.test")},
+					Kubernetes: &settings.TransferKubernetes{Aliases: map[string]string{"dev": "imported"}}}}
+			result := handleSettingsTransfer(t.Context(), app, home, req)
+			wantPort := newPort
+			if scenario.portOccupied || scenario.changeAtApply != 0 {
+				wantPort = initial.Server.Port
+			}
+			if result.Settings == nil || !result.Settings.Saved || result.Settings.Applied != (wantPort == newPort) {
+				t.Fatalf("response did not distinguish saved values and listener result: %+v", result)
+			}
+			got := result.Settings.Config
+			if got.Server.Port != wantPort || got.Server.Domain != "example.test" || got.Kubernetes.Aliases()["dev"] != scenario.wantAlias ||
+				got.PendingKubeconfigFingerprint() != "" || app.state.ProxyFingerprint != got.ProxyFingerprint() {
+				t.Fatalf("saved/active settings: %+v, %+v", got, app.state)
+			}
+		})
 	}
 }

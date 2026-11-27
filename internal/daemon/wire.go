@@ -29,6 +29,7 @@ var (
 	ErrAlreadyRunning        = errors.New("kuri is already running.")
 	ErrAutoStartDisabled     = errors.New("Automatic proxy startup is disabled.")
 	ErrSettingsChanged       = errors.New("Settings changed before the reverse proxy could apply them.")
+	ErrKubeconfigChanged     = errors.New("The kubeconfig changed. Review the current contexts and try again.")
 	ErrPortRestartRequired   = errors.New("Changing this listener requires restarting the reverse proxy.")
 	ErrPortOccupied          = errors.New("port is already in use by another process")
 	ErrIncompatible          = errors.New("Incompatible kuri control protocol. Update the installed kuri binary.")
@@ -92,6 +93,8 @@ func failure(err error) reply {
 		return reply{Code: "auto_start_disabled", Error: err.Error()}
 	case errors.Is(err, ErrSettingsChanged):
 		return reply{Code: "settings_changed", Error: err.Error()}
+	case errors.Is(err, ErrKubeconfigChanged):
+		return reply{Code: "kubeconfig_changed", Error: err.Error()}
 	case errors.Is(err, ErrPortRestartRequired):
 		return reply{Code: "restart_required", Error: err.Error()}
 	case errors.Is(err, ErrPortOccupied):
@@ -130,6 +133,8 @@ func decodeControlReply(decoder *json.Decoder) (reply, error) {
 		return reply{}, ErrAutoStartDisabled
 	case "settings_changed":
 		return reply{}, ErrSettingsChanged
+	case "kubeconfig_changed":
+		return reply{}, ErrKubeconfigChanged
 	case "restart_required":
 		return reply{}, ErrPortRestartRequired
 	case "port_occupied":

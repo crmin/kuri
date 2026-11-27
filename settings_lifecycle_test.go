@@ -25,6 +25,7 @@ type testSettingsServer struct {
 	registration launchd.Registration
 	ownedPort    int
 	start        func(context.Context) (int, error)
+	beforeApply  func(settings.Config, string) error
 	states       []daemon.State
 }
 
@@ -45,6 +46,15 @@ func (s *testSettingsServer) ApplySettings(_ context.Context, state daemon.State
 	}
 	if retainPort {
 		cfg.Server.Port = state.Port
+	}
+	if s.beforeApply != nil {
+		var expected string
+		if len(kubeconfig) > 0 {
+			expected = kubeconfig[0]
+		}
+		if err := s.beforeApply(cfg, expected); err != nil {
+			return daemon.State{}, err
+		}
 	}
 	if cfg.Server.Port == s.blockedPort {
 		return daemon.State{}, daemon.ErrPortOccupied
@@ -89,6 +99,24 @@ func (*testSettingsServer) HandoffDirectForeground(context.Context, daemon.State
 func (s *testSettingsServer) EnsurePolicySupport(context.Context) error { return s.policyErr }
 func (s *testSettingsServer) CheckSettingsSchema(context.Context, daemon.State, int) error {
 	return s.schemaErr
+}
+
+func TestGuardedPortRestartConfirmation(t *testing.T) {
+	cfg := settings.Defaults(t.TempDir())
+	approved := strings.Repeat("a", 64)
+	cfg.SetPendingKubeconfigFingerprint(approved)
+	app := &testSettingsServer{state: daemon.State{PID: 123, Mode: "foreground", ForegroundOwner: 23,
+		Port: cfg.Server.Port, ProxyFingerprint: cfg.ProxyFingerprint(), KubeconfigFingerprint: strings.Repeat("b", 64)}}
+	if err := confirmServingSettings(t.Context(), app, cfg); !errors.Is(err, daemon.ErrKubeconfigChanged) {
+		t.Fatalf("confirmed settings on another kubeconfig: %v", err)
+	}
+	if err := waitForForegroundRestart(t.Context(), app, app.state, cfg); !errors.Is(err, daemon.ErrKubeconfigChanged) {
+		t.Fatalf("confirmed foreground handoff on another kubeconfig: %v", err)
+	}
+	app.state.KubeconfigFingerprint = approved
+	if err := confirmServingSettings(t.Context(), app, cfg); err != nil {
+		t.Fatalf("rejected approved kubeconfig: %v", err)
+	}
 }
 
 func TestLegacyDaemonSettingsCompatibility(t *testing.T) {
