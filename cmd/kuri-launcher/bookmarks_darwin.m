@@ -67,6 +67,7 @@ static NSStackView *bookmarkStack(NSUserInterfaceLayoutOrientation orientation, 
     stack.alignment = orientation == NSUserInterfaceLayoutOrientationVertical ?
         NSLayoutAttributeLeading : NSLayoutAttributeCenterY;
     stack.spacing = spacing;
+    stack.distribution = NSStackViewDistributionFill;
     return stack;
 }
 

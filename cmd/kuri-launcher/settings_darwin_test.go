@@ -84,6 +84,12 @@ func TestAddBookmarkDialog(t *testing.T) {
 	}
 }
 
+func TestBookmarkedServicesPopover(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "bookmark-menu"))); got != "ok" {
+		t.Fatalf("bookmark menu: %q", got)
+	}
+}
+
 func TestSettingsTransferSelection(t *testing.T) {
 	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "transfer"))); got != "ok" {
 		t.Fatalf("settings transfer: %q", got)

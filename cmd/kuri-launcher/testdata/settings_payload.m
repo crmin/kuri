@@ -104,8 +104,39 @@ static void replyToBookmarkRequest(uint64_t sequence, NSString *operation, NSDic
 - (void)removeItem:(id)sender;
 @end
 
+@interface FixtureBookmarkDrag : NSObject
+@property(nonatomic, assign) id draggingSource;
+@property(nonatomic, retain) NSPasteboard *draggingPasteboard;
+@end
+
+@implementation FixtureBookmarkDrag
+- (void)dealloc {
+    [_draggingPasteboard release];
+    [super dealloc];
+}
+@end
+
 @interface KuriBookmarkChoices : NSObject
 - (void)filter:(NSString *)query;
+@end
+
+@interface FixtureShownPopover : NSPopover
+@end
+
+@implementation FixtureShownPopover
+- (BOOL)isShown { return YES; }
+@end
+
+@interface KuriPopover (BookmarkMenuFixture)
+- (void)showBookmarks:(id)sender;
+- (void)focusBookmarks:(id)sender;
+- (void)closeBookmarks;
+- (void)showRecent:(id)sender;
+@end
+
+@interface KuriBookmarkMenuView : NSView
+- (void)filter;
+- (void)copyBookmark:(NSButton *)button pasteboard:(NSPasteboard *)pasteboard;
 @end
 
 void kuriGoAction(int action) { abort(); }
@@ -136,6 +167,82 @@ static void renderStyleLabels(KuriSettings *settings) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         KuriSettings *settings = [[[KuriSettings alloc] initWithWindow:nil] autorelease];
+        if (argc == 2 && !strcmp(argv[1], "bookmark-menu")) {
+            [NSApplication sharedApplication];
+            KuriPopover *controller = [[[KuriPopover alloc] init] autorelease];
+            NSWindow *window = [[[NSWindow alloc] initWithContentRect:NSMakeRect(90, 100, 346, 250)
+                styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO] autorelease];
+            window.contentView = controller.view;
+            [controller setValue:[[[FixtureShownPopover alloc] init] autorelease] forKey:@"popover"];
+            [controller applyView:@{@"known": @NO}];
+            NSButton *bookmarks = [controller valueForKey:@"bookmarkButton"], *recent = [controller valueForKey:@"recentButton"];
+            if (!bookmarks.enabled || recent.enabled || NSMaxY(bookmarks.frame) != NSMinY(recent.frame)) abort();
+            NSEvent *hover = [NSEvent enterExitEventWithType:NSEventTypeMouseEntered location:NSZeroPoint
+                modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil
+                eventNumber:0 trackingNumber:0 userData:NULL];
+            [bookmarks mouseEntered:hover];
+            NSPanel *panel = [controller valueForKey:@"bookmarkPanel"];
+            if (!panel.isVisible || ![[bookmarks valueForKey:@"submenuOpen"] boolValue]) abort();
+            NSString *url = @"http://web.api.namespace.live.kuri.localhost:8081";
+            NSArray *services = @[
+                @{@"id": @"first", @"name": @"Alpha Shared", @"context": @"ctx", @"namespace": @"namespace", @"service": @"api",
+                    @"port_name": @"web", @"label": @"web.api.namespace.live", @"url": url},
+                @{@"id": @"second", @"name": @"Beta Shared \uD55C\uAE00", @"context": @"Other", @"namespace": @"default", @"service": @"invoices",
+                    @"label": @"invoices.default.other", @"unavailable": @"Different kubeconfig"},
+                @{@"id": @"third", @"context": @"Other", @"namespace": @"default", @"service": @"index",
+                    @"label": @"index.default.other", @"url": @"http://index.default.other.kuri.localhost"},
+            ];
+            replyToBookmarkRequest(bookmarkSequence, @"menu", @{@"rows": services});
+            KuriBookmarkMenuView *menu = [controller valueForKey:@"bookmarkMenu"];
+            NSSearchField *search = [menu valueForKey:@"search"];
+            if (![search.placeholderString isEqual:@"Search..."]) abort();
+            NSView *separator = [menu valueForKey:@"separator"];
+            NSScrollView *list = [menu valueForKey:@"list"];
+            [menu layoutSubtreeIfNeeded];
+            if (NSMaxY(search.frame) >= NSMinY(separator.frame) || NSMaxY(separator.frame) >= NSMinY(list.frame)) abort();
+            [controller focusBookmarks:nil];
+            if (panel.firstResponder != search && panel.firstResponder != search.currentEditor) abort();
+            NSDictionary *queries = @{@"ALPHA": @[@"first"], @"CTX": @[@"first"], @"NAMESPACE": @[@"first"],
+                @"API": @[@"first"], @"WEB": @[@"first"], @"LIVE": @[@"first"], @"shared": @[@"first", @"second"], @"\uD55C\uAE00": @[@"second"],
+                @"not present": @[]};
+            for (NSString *query in queries) {
+                search.stringValue = query;
+                [menu performSelector:@selector(controlTextDidChange:) withObject:
+                    [NSNotification notificationWithName:NSControlTextDidChangeNotification object:search]];
+                if (![[[menu valueForKey:@"visibleRows"] valueForKey:@"id"] isEqual:queries[query]]) abort();
+            }
+            search.stringValue = @"";
+            [menu filter];
+            NSArray<NSButton *> *buttons = [menu valueForKey:@"buttons"];
+            if (![buttons[0].title isEqual:@"Alpha Shared (web.api.namespace.live)"] ||
+                buttons[1].enabled || ![buttons[2].title isEqual:@"(index.default.other)"]) abort();
+            NSColor *secondary = [buttons[0].attributedTitle attribute:NSForegroundColorAttributeName
+                atIndex:buttons[0].title.length - 1 effectiveRange:NULL];
+            if (![secondary isEqual:NSColor.secondaryLabelColor]) abort();
+            NSPasteboard *clipboard = [NSPasteboard pasteboardWithUniqueName];
+            [menu copyBookmark:buttons[0] pasteboard:clipboard];
+            if (![buttons[0].title isEqual:@"Copied"] || ![[clipboard stringForType:NSPasteboardTypeString] isEqual:url]) abort();
+            [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1.1]];
+            if (![buttons[0].title isEqual:@"Alpha Shared (web.api.namespace.live)"]) abort();
+            [clipboard releaseGlobally];
+
+            NSRect usable = NSMakeRect(0, 0, 1200, 800);
+            NSRect left = NSMakeRect(100, 550, 346, 240), right = NSMakeRect(820, 550, 346, 240);
+            NSSize size = NSMakeSize(340, 285);
+            if (NSMinX(kuriServiceMenuFrame(left, left, usable, size)) <= NSMaxX(left) ||
+                NSMaxX(kuriServiceMenuFrame(right, right, usable, size)) >= NSMinX(right)) abort();
+            [controller applyView:@{@"known": @YES, @"mode": @"stopped", @"recent_available": @YES}];
+            [controller showRecent:nil];
+            if (panel.isVisible || ![[controller valueForKey:@"recentPanel"] isVisible]) abort();
+            [controller showBookmarks:nil];
+            if (!panel.isVisible || [[controller valueForKey:@"recentPanel"] isVisible]) abort();
+            replyToBookmarkRequest(bookmarkSequence, @"menu", @{@"error": @"Could not read bookmarks."});
+            NSTextField *status = [menu valueForKey:@"status"];
+            if (status.hidden || ![status.stringValue isEqual:@"Could not read bookmarks."]) abort();
+            [controller closeBookmarks];
+            puts("ok");
+            return 0;
+        }
         if (argc == 2 && (!strcmp(argv[1], "bookmark-editor") || !strcmp(argv[1], "bookmark-table"))) {
             [NSApplication sharedApplication];
             settings = [[[TransferFixtureSettings alloc] init] autorelease];
@@ -166,16 +273,45 @@ int main(int argc, char **argv) {
                         NSHeight(scroll.contentView.bounds), height, NSHeight(table.bounds), (long)table.numberOfRows);
                     return 1;
                 }
+                for (NSAppearanceName appearance in @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) {
+                    settings.window.appearance = [NSAppearance appearanceNamed:appearance];
+                    [settings.window setContentSize:NSMakeSize(490, 410)];
+                    [settings.window.contentView layoutSubtreeIfNeeded];
+                    NSTextField *name = [table viewAtColumn:0 row:0 makeIfNecessary:YES];
+                    if (!table.usesAlternatingRowBackgroundColors || ![name.stringValue isEqual:@"API"] ||
+                        NSHeight(scroll.contentView.bounds) - scroll.contentView.contentInsets.top != height) abort();
+                }
                 NSRect header = table.headerView.superview.frame;
                 CGFloat start = NSMinY(scroll.contentView.bounds);
                 [table scrollRowToVisible:8];
                 if (!NSEqualRects(header, table.headerView.superview.frame) || NSMinY(scroll.contentView.bounds) <= start) abort();
+                FixtureBookmarkDrag *drag = [[[FixtureBookmarkDrag alloc] init] autorelease];
+                drag.draggingSource = table;
+                NSDraggingSession *session = (NSDraggingSession *)drag;
+                drag.draggingPasteboard = [NSPasteboard pasteboardWithUniqueName];
+                [drag.draggingPasteboard writeObjects:@[[table.dataSource tableView:table pasteboardWriterForRow:0]]];
+                [table.dataSource tableView:table draggingSession:session willBeginAtPoint:NSZeroPoint
+                    forRowIndexes:[NSIndexSet indexSetWithIndex:0]];
+                if ([table.dataSource tableView:table validateDrop:(id<NSDraggingInfo>)drag proposedRow:9
+                    proposedDropOperation:NSTableViewDropAbove] != NSDragOperationMove ||
+                    ![table.dataSource tableView:table acceptDrop:(id<NSDraggingInfo>)drag row:9
+                    dropOperation:NSTableViewDropAbove]) abort();
+                if (![bookmarkRequest[@"before"] isEqual:@[@"0", @"1", @"2", @"3", @"4", @"5", @"6", @"7", @"8"]] ||
+                    ![bookmarkRequest[@"order"] isEqual:@[@"1", @"2", @"3", @"4", @"5", @"6", @"7", @"8", @"0"]]) abort();
+                [rows addObject:rows.firstObject];
+                [rows removeObjectAtIndex:0];
+                replyToBookmarkRequest(bookmarkSequence, @"reorder", @{@"items": rows, @"changed": @YES});
+                [table.dataSource tableView:table draggingSession:session endedAtPoint:NSZeroPoint operation:NSDragOperationMove];
+                [drag.draggingPasteboard releaseGlobally];
                 [table selectRowIndexes:[NSIndexSet indexSetWithIndex:4] byExtendingSelection:NO];
                 [bookmarks removeItem:nil];
-                if (![bookmarkRequest[@"id"] isEqualToString:@"4"]) abort();
+                if (![bookmarkRequest[@"id"] isEqualToString:@"5"]) abort();
                 [rows removeObjectAtIndex:4];
                 replyToBookmarkRequest(bookmarkSequence, @"remove", @{@"items": rows, @"changed": @YES});
                 if (table.numberOfRows != 8) abort();
+                [bookmarks reload];
+                replyToBookmarkRequest(bookmarkSequence, @"list", @{@"items": rows});
+                if (![[[bookmarks valueForKey:@"items"] valueForKey:@"id"] isEqual:@[@"1", @"2", @"3", @"4", @"6", @"7", @"8", @"0"]]) abort();
             } else {
                 replyToBookmarkRequest(bookmarkSequence, @"list", @{@"items": @[]});
                 [bookmarks openEditor:nil];
@@ -206,6 +342,11 @@ int main(int argc, char **argv) {
                 replyToBookmarkRequest(bookmarkSequence, @"ports", @{@"options": @[@"web", @"admin"]});
                 if (!selects[3].enabled) abort();
                 NSTextField *name = [bookmarks valueForKey:@"name"];
+                NSWindow *dialog = [settings valueForKey:@"dialog"];
+                [dialog.contentView layoutSubtreeIfNeeded];
+                for (NSButton *select in selects) {
+                    if (NSWidth(select.frame) != NSWidth(name.frame) || NSWidth(select.frame) < 200) abort();
+                }
                 name.stringValue = @"Shared name";
                 [bookmarks addItem];
                 if (![bookmarkRequest[@"name"] isEqual:name.stringValue] || ![bookmarkRequest[@"context"] isEqual:@"preview"]) abort();
