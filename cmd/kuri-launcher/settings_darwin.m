@@ -439,13 +439,14 @@ static NSString *settingsString(id value) {
 
 - (void)toggle:(NSButton *)sender {
     NSString *key = sender.identifier;
-    NSNumber *on = @(sender.state == NSControlStateValueOn);
+    NSNumber *on = [NSNumber numberWithBool:(sender.state == NSControlStateValueOn)];
     if (self.styles[key]) [self submit:@{@"style": @{@"name": key, @"on": on}}];
     else [self submit:@{key: on}];
 }
 
 - (void)changeContext:(NSSwitch *)sender {
-    [self submit:@{@"context": @{@"name": sender.identifier, @"on": @(sender.state == NSControlStateValueOn)}}];
+    NSNumber *on = [NSNumber numberWithBool:(sender.state == NSControlStateValueOn)];
+    [self submit:@{@"context": @{@"name": sender.identifier, @"on": on}}];
 }
 
 - (void)changeTrigger:(NSPopUpButton *)sender {
