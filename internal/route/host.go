@@ -22,8 +22,30 @@ type Target struct {
 	Port      int32
 }
 
-type Request struct {
+// Selector identifies a Service port by name, an unnamed port by number, or
+// the default port when both are empty. Only recovery uses an unnamed number.
+type Selector struct {
 	Target
+	PortName string `json:",omitempty"`
+}
+
+func ResolvedSelector(target Target, portName string) Selector {
+	if portName != "" {
+		target.Port = 0
+	}
+	return Selector{Target: target, PortName: portName}
+}
+
+func (s Selector) IsDefault() bool { return s.PortName == "" && s.Port == 0 }
+
+func (s Selector) ServiceTarget() Target {
+	target := s.Target
+	target.Port = 0
+	return target
+}
+
+type Request struct {
+	Selector
 	Host string
 }
 
@@ -62,37 +84,33 @@ func Alias(name string) string {
 	return fmt.Sprintf("ctx-%x", sum[:8])
 }
 
-func ForwardLabel(target Target, defaultPort bool) string {
+func ForwardLabel(target Target, portName string, defaultPort bool) string {
 	label := target.Service + "." + target.Namespace + "." + Alias(target.Context)
-	if !defaultPort {
-		return strconv.Itoa(int(target.Port)) + "." + label
+	if !defaultPort && portName != "" {
+		return portName + "." + label
 	}
 	return label
 }
 
-func (c Contexts) ForwardHost(target Target, defaultPort bool) string {
-	_, host := c.ForwardAddress(target, defaultPort)
-	return host
-}
-
-func (c Contexts) ForwardAddress(target Target, defaultPort bool) (label, authority string) {
+func (c Contexts) ForwardAddress(target Target, portName string, defaultPort bool) (label, authority string) {
 	base := target.Service + "." + target.Namespace
 	explicit := base + "." + Alias(target.Context)
-	portLabel := strconv.Itoa(int(target.Port)) + "." + explicit
-	options := []string{portLabel}
+	var options []string
 	if defaultPort {
-		options = []string{explicit, base, portLabel}
+		options = append(options, explicit, base)
 	}
+	if portName != "" {
+		options = append(options, portName+"."+explicit)
+	}
+	service := target
+	service.Port = 0
 	for _, label := range options {
 		host := label + "." + c.server.Domain
 		got, err := c.Parse(host)
 		if err != nil {
 			continue
 		}
-		if got.Port == 0 && defaultPort {
-			got.Port = target.Port
-		}
-		if got.Target != target {
+		if got.Target != service || (got.PortName != portName && !(defaultPort && got.IsDefault())) {
 			continue
 		}
 		if c.server.Port != 80 {
@@ -100,7 +118,7 @@ func (c Contexts) ForwardAddress(target Target, defaultPort bool) (label, author
 		}
 		return label, host
 	}
-	return ForwardLabel(target, defaultPort), ""
+	return ForwardLabel(target, portName, defaultPort), ""
 }
 
 func normalizeHost(host, suffix string) (string, error) {
@@ -140,13 +158,9 @@ func (c Contexts) Parse(host string) (Request, error) {
 		}
 	}
 
-	var port int32
+	var portName string
 	if len(labels) == 4 {
-		number, err := strconv.ParseUint(labels[0], 10, 16)
-		if err != nil || number == 0 || !digits.MatchString(labels[0]) {
-			return Request{}, errors.New("invalid service port in host")
-		}
-		port = int32(number)
+		portName = labels[0]
 		labels = labels[1:]
 	}
 
@@ -159,5 +173,6 @@ func (c Contexts) Parse(host string) (Request, error) {
 	} else if !c.names[context] {
 		return Request{}, errors.New("no valid current Kubernetes context")
 	}
-	return Request{Target: Target{Context: context, Namespace: labels[1], Service: labels[0], Port: port}, Host: name}, nil
+	target := Target{Context: context, Namespace: labels[1], Service: labels[0]}
+	return Request{Selector: Selector{Target: target, PortName: portName}, Host: name}, nil
 }

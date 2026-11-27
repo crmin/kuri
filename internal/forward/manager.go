@@ -8,6 +8,7 @@ import (
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,16 +25,17 @@ const (
 )
 
 var (
-	ErrPortInUse = errors.New("local port is in use")
-	errClosed    = errors.New("port forwarding is shutting down")
-	errExpired   = errors.New("port forward expired")
-	errEvicted   = errors.New("port forward was evicted to free a local port")
+	ErrPortInUse      = errors.New("local port is in use")
+	errClosed         = errors.New("port forwarding is shutting down")
+	errExpired        = errors.New("port forward expired")
+	errEvicted        = errors.New("port forward was evicted to free a local port")
+	errDefaultChanged = errors.New("the default service port changed")
 )
 
 type Destination struct {
 	route.Target
 	PortName    string
-	DefaultPort int32
+	DefaultPort route.Selector
 	Pod         string
 	PodUID      string
 	TargetPort  int32
@@ -46,7 +48,7 @@ type Tunnel struct {
 }
 
 type Backend interface {
-	Resolve(context.Context, route.Target, string) ([]Destination, error)
+	Resolve(context.Context, route.Selector, string) ([]Destination, error)
 	Open(context.Context, Destination, int) (Tunnel, error)
 }
 
@@ -72,9 +74,9 @@ type Manager struct {
 	ports            *portPool
 
 	mu        sync.Mutex
-	entries   map[route.Target]*entry
-	defaults  map[route.Target]int32
-	lookups   map[route.Target]*lookup
+	entries   map[route.Selector]*entry
+	defaults  map[route.Target]route.Selector
+	lookups   map[route.Selector]*lookup
 	ephemeral map[*entry]struct{}
 	keepAlive bool
 	lifetime  time.Duration
@@ -97,7 +99,7 @@ type lookup struct {
 
 type entry struct {
 	owner     *Manager
-	target    route.Target
+	key       route.Selector
 	host      string
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -137,8 +139,8 @@ func newManager(backend Backend, minPort, maxPort int, check func(int) error, pr
 	return &Manager{
 		backend: backend, ctx: ctx, cancel: cancel, minPort: minPort, maxPort: maxPort,
 		checkPort: check, probe: probe,
-		entries: make(map[route.Target]*entry), defaults: make(map[route.Target]int32),
-		lookups: make(map[route.Target]*lookup), ephemeral: make(map[*entry]struct{}),
+		entries: make(map[route.Selector]*entry), defaults: make(map[route.Target]route.Selector),
+		lookups: make(map[route.Selector]*lookup), ephemeral: make(map[*entry]struct{}),
 		ports:     &portPool{owners: make(map[int]*entry), changed: make(chan struct{})},
 		keepAlive: true, lifetime: 60 * time.Minute, trigger: settings.LastRequest,
 	}
@@ -153,6 +155,15 @@ func (m *Manager) Acquire(ctx context.Context, request route.Request) (*Lease, e
 }
 
 func (m *Manager) AcquireRequest(ctx context.Context, request route.Request) (*Lease, func(), error) {
+	for {
+		lease, release, err := m.acquireRequest(ctx, request)
+		if err != errDefaultChanged {
+			return lease, release, err
+		}
+	}
+}
+
+func (m *Manager) acquireRequest(ctx context.Context, request route.Request) (*Lease, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -171,21 +182,21 @@ func (m *Manager) AcquireRequest(ctx context.Context, request route.Request) (*L
 		return m.acquireEphemeral(ctx, request)
 	}
 
-	target := request.Target
-	if target.Port == 0 {
-		target.Port = m.defaults[target]
+	key := request.Selector
+	if key.IsDefault() {
+		key = m.defaults[key.ServiceTarget()]
 	}
-	if current := m.entries[target]; m.useLocked(current) {
+	if current := m.entries[key]; m.useLocked(current) {
 		m.mu.Unlock()
-		return m.await(ctx, current)
+		return m.await(ctx, request.Selector, current)
 	}
 
 	// Resolve without the requesting context so one canceled caller cannot
 	// cancel a connection shared by other requests.
-	pending := m.lookups[request.Target]
+	pending := m.lookups[request.Selector]
 	if pending == nil {
 		pending = &lookup{done: make(chan struct{})}
-		m.lookups[request.Target] = pending
+		m.lookups[request.Selector] = pending
 		m.workers.Go(func() { m.load(request, pending) })
 	}
 	m.mu.Unlock()
@@ -197,7 +208,7 @@ func (m *Manager) AcquireRequest(ctx context.Context, request route.Request) (*L
 		if pending.err != nil {
 			return nil, nil, pending.err
 		}
-		return m.await(ctx, pending.entry)
+		return m.await(ctx, request.Selector, pending.entry)
 	}
 }
 
@@ -219,20 +230,15 @@ func (m *Manager) useLocked(e *entry) bool {
 	return true
 }
 
-func defaultTarget(key route.Target) route.Target {
-	key.Port = 0
-	return key
-}
-
 func (m *Manager) load(req route.Request, pending *lookup) {
 	ctx, cancel := context.WithTimeout(m.ctx, startupTimeout)
 	defer cancel()
-	destinations, err := m.backend.Resolve(ctx, req.Target, "")
+	destinations, err := m.backend.Resolve(ctx, req.Selector, "")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	defer close(pending.done)
-	delete(m.lookups, req.Target)
+	delete(m.lookups, req.Selector)
 
 	if err != nil {
 		pending.err = err
@@ -248,31 +254,39 @@ func (m *Manager) load(req route.Request, pending *lookup) {
 	}
 
 	selected := destinations[0]
-	key := selected.Target
+	key := route.ResolvedSelector(selected.Target, selected.PortName)
 	e := m.entries[key]
 	if !m.useLocked(e) {
 		entryContext, cancelEntry := context.WithCancel(m.ctx)
 		e = &entry{
-			owner: m, target: key, host: req.Host, ctx: entryContext, cancel: cancelEntry,
+			owner: m, key: key, host: req.Host, ctx: entryContext, cancel: cancelEntry,
 			finished: make(chan struct{}), changed: make(chan struct{}), wake: make(chan struct{}, 1),
 		}
 		m.entries[key] = e
 		m.workers.Go(func() { m.run(e, destinations) })
 	}
-	if selected.DefaultPort != 0 {
-		m.defaults[defaultTarget(key)] = selected.DefaultPort
-	} else {
-		delete(m.defaults, defaultTarget(key))
-	}
+	m.setDefaultLocked(key.ServiceTarget(), selected.DefaultPort)
 	pending.entry = e
 }
 
-func (m *Manager) await(ctx context.Context, e *entry) (*Lease, func(), error) {
+func (m *Manager) setDefaultLocked(service route.Target, selected route.Selector) {
+	if selected.IsDefault() {
+		delete(m.defaults, service)
+	} else {
+		m.defaults[service] = selected
+	}
+	m.updateRecentDefaultLocked(service, selected)
+}
+
+func (m *Manager) await(ctx context.Context, selector route.Selector, e *entry) (*Lease, func(), error) {
 	for {
 		m.mu.Lock()
 		changed, lease, err := e.changed, e.lease, e.err
 		if e.retired && err == nil {
 			err = errExpired
+		}
+		if err == nil && selector.IsDefault() && m.defaults[selector.ServiceTarget()] != e.key {
+			err = errDefaultChanged
 		}
 		if err == nil && lease != nil && lease.isAlive() {
 			if err = ctx.Err(); err == nil {
@@ -316,7 +330,8 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 
 	for err == nil {
 		m.mu.Lock()
-		if e.opened.IsZero() {
+		recovered := !e.opened.IsZero()
+		if !recovered {
 			e.opened = lease.Connected
 			e.deadline = e.opened.Add(m.lifetime)
 		}
@@ -325,6 +340,10 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 			m.release(e, lease)
 			err = errExpired
 			break
+		}
+		service := e.key.ServiceTarget()
+		if recovered && m.defaults[service] == e.key {
+			m.setDefaultLocked(service, lease.Destination.DefaultPort)
 		}
 		e.lease = lease
 		e.notifyLocked()
@@ -362,11 +381,11 @@ func (e *entry) wakeLocked() {
 }
 
 func (m *Manager) forgetLocked(e *entry) {
-	if m.entries[e.target] == e {
-		delete(m.entries, e.target)
-		key := defaultTarget(e.target)
-		if m.defaults[key] == e.target.Port {
-			delete(m.defaults, key)
+	if m.entries[e.key] == e {
+		delete(m.entries, e.key)
+		service := e.key.ServiceTarget()
+		if m.defaults[service] == e.key {
+			delete(m.defaults, service)
 		}
 	}
 }
@@ -448,18 +467,8 @@ func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
 		}
 		ctx, cancel := context.WithDeadline(e.ctx, deadline)
 		attempt, stopAttempt := context.WithTimeout(ctx, startupTimeout)
-		destinations, err := m.backend.Resolve(attempt, e.target, failed.PodUID)
+		destinations, err := m.backend.Resolve(attempt, e.key, failed.PodUID)
 		if err == nil && len(destinations) > 0 {
-			m.mu.Lock()
-			key := defaultTarget(e.target)
-			if m.entries[e.target] == e && m.defaults[key] == e.target.Port {
-				if destinations[0].DefaultPort == 0 {
-					delete(m.defaults, key)
-				} else {
-					m.defaults[key] = destinations[0].DefaultPort
-				}
-			}
-			m.mu.Unlock()
 			var lease *Lease
 			lease, err = m.open(attempt, e, destinations, true, 0)
 			if err == nil {
@@ -677,7 +686,10 @@ func (m *Manager) Snapshot() []Row {
 	}
 	m.mu.Unlock()
 	slices.SortFunc(rows, func(a, b Row) int {
-		return compareTarget(a.Target, b.Target)
+		if order := compareTarget(a.Target, b.Target); order != 0 {
+			return order
+		}
+		return strings.Compare(a.PortName, b.PortName)
 	})
 	return rows
 }
@@ -689,10 +701,15 @@ func isActive(e *entry, now time.Time) bool {
 // snapshotRow copies the mutable entry into the caller's snapshot. Hold m.mu.
 func (m *Manager) snapshotRow(e *entry) Row {
 	lastAccess := e.lastAccess
+	dest := e.lease.Destination
+	defaultPort := dest.DefaultPort == e.key
+	if !e.ephemeral {
+		defaultPort = m.defaults[e.key.ServiceTarget()] == e.key
+	}
 	return Row{
-		Target: e.target, PortName: e.lease.Destination.PortName, LocalPort: e.lease.LocalPort,
+		Target: dest.Target, PortName: dest.PortName, LocalPort: e.lease.LocalPort,
 		Connected: e.lease.Connected, LastAccess: &lastAccess,
-		DefaultPort: e.lease.Destination.DefaultPort == e.target.Port,
+		DefaultPort: defaultPort,
 	}
 }
 

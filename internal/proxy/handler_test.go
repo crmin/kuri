@@ -19,21 +19,39 @@ import (
 
 type httpBackend struct{ upstream http.Handler }
 
-func (b httpBackend) Resolve(_ context.Context, target route.Target, _ string) ([]forward.Destination, error) {
-	if target.Port == 0 {
-		target.Port = 8080
+func (b httpBackend) Resolve(_ context.Context, selector route.Selector, _ string) ([]forward.Destination, error) {
+	target := selector.Target
+	portName := selector.PortName
+	defaultPort := route.Selector{}
+	var podPort int32
+	switch portName {
+	case "", "http":
+		portName, target.Port, podPort = "http", 8080, 80
+		defaultPort = route.ResolvedSelector(target, portName)
+	case "web":
+		target.Port, podPort = 3000, 3000
+	case "admin":
+		target.Port, podPort = 8000, 8000
+	default:
+		return nil, fmt.Errorf("service has no TCP port named %q", portName)
 	}
 	return []forward.Destination{{
-		Target: target, PortName: "http", DefaultPort: 8080, Pod: "pod", TargetPort: 80,
+		Target: target, PortName: portName, DefaultPort: defaultPort, Pod: "pod", TargetPort: podPort,
 	}}, nil
 }
 
-func (b httpBackend) Open(_ context.Context, _ forward.Destination, port int) (forward.Tunnel, error) {
+func (b httpBackend) Open(_ context.Context, destination forward.Destination, port int) (forward.Tunnel, error) {
 	listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
 		return forward.Tunnel{}, err
 	}
-	server := &http.Server{Handler: b.upstream}
+	upstream := b.upstream
+	if upstream == nil {
+		upstream = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = fmt.Fprintf(w, "%s:%d", destination.PortName, destination.TargetPort)
+		})
+	}
+	server := &http.Server{Handler: upstream}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -75,6 +93,52 @@ func TestProxyPreservesRequest(t *testing.T) {
 		entry.Service != "api" || entry.RemotePort != 8080 || entry.Protocol != "tcp" ||
 		entry.LocalAddr != "127.0.0.1" || entry.LocalPort < 30000 || entry.LocalPort >= 40000 {
 		t.Fatalf("missing or invalid request metadata: %+v", entry)
+	}
+}
+
+func TestProxyRoutesNamedServicePorts(t *testing.T) {
+	for _, keepAlive := range []bool{true, false} {
+		t.Run(fmt.Sprintf("keep-alive=%t", keepAlive), func(t *testing.T) {
+			cfg := settings.Defaults("")
+			cfg.PortForward.KeepAlive = keepAlive
+			manager := forward.NewManagerWithPolicy(httpBackend{}, cfg.PortForward)
+			t.Cleanup(manager.Close)
+			log := &testLog{}
+			contexts := route.NewConfiguredContexts("prod", []string{"prod"}, cfg.Server)
+			handler := New(contexts, manager, log, func(err error) { t.Error(err) })
+			request := func(handler *Handler, name string) *httptest.ResponseRecorder {
+				resp := httptest.NewRecorder()
+				url := "http://" + name + ".our-product.service.prod.kuri.localhost/"
+				handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, url, nil))
+				return resp
+			}
+			for _, port := range []struct {
+				name   string
+				number int32
+			}{{"web", 3000}, {"admin", 8000}} {
+				resp := request(handler, port.name)
+				if want := fmt.Sprintf("%s:%d", port.name, port.number); resp.Code != http.StatusOK || resp.Body.String() != want {
+					t.Fatalf("%s: HTTP %d, %q; want %q", port.name, resp.Code, resp.Body.String(), want)
+				}
+				conn := log.events[len(log.events)-1].Connection
+				if conn == nil || conn.RemotePort != port.number || conn.Context != "prod" || conn.Service != "our-product" || conn.Namespace != "service" {
+					t.Fatalf("%s: bad connection metadata: %+v", port.name, conn)
+				}
+			}
+			if rows := manager.Snapshot(); (keepAlive && len(rows) != 2) || (!keepAlive && len(rows) != 0) {
+				t.Fatalf("unexpected active forwards: %+v", rows)
+			}
+			for _, name := range []string{"missing", "3000"} {
+				if resp := request(handler, name); resp.Code != http.StatusBadGateway {
+					t.Errorf("%s: HTTP %d, want 502", name, resp.Code)
+				}
+			}
+			cfg.Server.Styles.ExplicitPort = false
+			disabled := New(route.NewConfiguredContexts("prod", []string{"prod"}, cfg.Server), manager, log, func(err error) { t.Error(err) })
+			if resp := request(disabled, "web"); resp.Code != http.StatusBadRequest {
+				t.Errorf("disabled named style: HTTP %d, want 400", resp.Code)
+			}
+		})
 	}
 }
 

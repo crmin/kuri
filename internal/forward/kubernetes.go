@@ -128,7 +128,8 @@ func (k *Kubernetes) client(name string) (*coreclient.CoreV1Client, *rest.Config
 	return client, config, nil
 }
 
-func (k *Kubernetes) Resolve(ctx context.Context, target route.Target, failedPod string) ([]Destination, error) {
+func (k *Kubernetes) Resolve(ctx context.Context, selector route.Selector, failedPod string) ([]Destination, error) {
+	target := selector.Target
 	client, _, err := k.client(target.Context)
 	if err != nil {
 		return nil, err
@@ -141,14 +142,19 @@ func (k *Kubernetes) Resolve(ctx context.Context, target route.Target, failedPod
 		return nil, kubernetesError("get Kubernetes service", err)
 	}
 
-	port, err := route.ChooseServicePort(service.Spec.Ports, target.Port)
+	port, err := route.ChooseServicePort(service.Spec.Ports, selector)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errRouteUnavailable, err)
 	}
 	if len(service.Spec.Selector) == 0 {
 		return nil, fmt.Errorf("%w: service has no pod selector", errRouteUnavailable)
 	}
-	defaultPort, _ := route.ChooseServicePort(service.Spec.Ports, 0)
+	var defaultPort route.Selector
+	if port, err := route.ChooseServicePort(service.Spec.Ports, route.Selector{}); err == nil {
+		defaultTarget := target
+		defaultTarget.Port = port.Port
+		defaultPort = route.ResolvedSelector(defaultTarget, port.Name)
+	}
 	target.Port = port.Port
 	pods, err := client.Pods(target.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labels.Set(service.Spec.Selector).String(),
@@ -173,7 +179,7 @@ func (k *Kubernetes) Resolve(ctx context.Context, target route.Target, failedPod
 		podPort, err := podTargetPort(port, pod, service.Spec.ClusterIP == corev1.ClusterIPNone)
 		if err == nil {
 			destinations = append(destinations, Destination{
-				Target: target, PortName: port.Name, DefaultPort: defaultPort.Port,
+				Target: target, PortName: port.Name, DefaultPort: defaultPort,
 				Pod: pod.Name, PodUID: string(pod.UID), TargetPort: podPort,
 			})
 		}

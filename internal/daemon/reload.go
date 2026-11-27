@@ -210,7 +210,8 @@ func (r *proxyRuntime) menu(state State, history bool) (menuview.State, error) {
 
 func (r *proxyRuntime) withHosts(rows []forward.Row) []forward.Row {
 	for i := range rows {
-		rows[i].MenuLabel, rows[i].MenuHost = r.routes.ForwardAddress(rows[i].Target, rows[i].DefaultPort)
+		row := &rows[i]
+		row.MenuLabel, row.MenuHost = r.routes.ForwardAddress(row.Target, row.PortName, row.DefaultPort)
 	}
 	return rows
 }

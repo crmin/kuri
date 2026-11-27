@@ -14,8 +14,12 @@ func compareTarget(a, b route.Target) int {
 		cmp.Compare(a.Service, b.Service), cmp.Compare(a.Port, b.Port))
 }
 
-func compareRecent(aTime time.Time, a route.Target, bTime time.Time, b route.Target) int {
-	return cmp.Or(bTime.Compare(aTime), compareTarget(a, b))
+func (row Row) Selector() route.Selector {
+	return route.ResolvedSelector(row.Target, row.PortName)
+}
+
+func compareRecent(aTime time.Time, a route.Selector, bTime time.Time, b route.Selector) int {
+	return cmp.Or(bTime.Compare(aTime), compareTarget(a.Target, b.Target), cmp.Compare(a.PortName, b.PortName))
 }
 
 // RecentSnapshot counts the active forwards and copies only the selected rows
@@ -32,7 +36,7 @@ func (m *Manager) RecentSnapshot(limit int) (int, []Row) {
 			return
 		}
 		at, _ := slices.BinarySearchFunc(best, e, func(a, b *entry) int {
-			return compareRecent(a.lastAccess, a.target, b.lastAccess, b.target)
+			return compareRecent(a.lastAccess, a.key, b.lastAccess, b.key)
 		})
 		if at == limit {
 			return
@@ -62,13 +66,25 @@ func (m *Manager) RecentSnapshot(limit int) (int, []Row) {
 
 func (m *Manager) recordLocked(e *entry) {
 	row := m.snapshotRow(e)
-	m.history = slices.DeleteFunc(m.history, func(entry Row) bool { return entry.Target == row.Target })
+	m.history = slices.DeleteFunc(m.history, func(entry Row) bool { return entry.Selector() == e.key })
 	at, _ := slices.BinarySearchFunc(m.history, row, func(a, b Row) int {
-		return compareRecent(*a.LastAccess, a.Target, *b.LastAccess, b.Target)
+		return compareRecent(*a.LastAccess, a.Selector(), *b.LastAccess, b.Selector())
 	})
 	if at < menuview.RecentLimit {
 		m.history = slices.Insert(m.history, at, row)
 		m.history = m.history[:min(len(m.history), menuview.RecentLimit)]
+	}
+}
+
+// Keep the copy URLs consistent with the latest observed default even for
+// rows that have not been visited again since that observation.
+func (m *Manager) updateRecentDefaultLocked(service route.Target, selected route.Selector) {
+	for i := range m.history {
+		row := &m.history[i]
+		key := row.Selector()
+		if key.ServiceTarget() == service {
+			row.DefaultPort = key == selected
+		}
 	}
 }
 
@@ -102,7 +118,7 @@ func RecentRows(rows []Row, limit int) ([]Row, bool) {
 		}
 	}
 	slices.SortFunc(recent, func(a, b Row) int {
-		return compareRecent(*a.LastAccess, a.Target, *b.LastAccess, b.Target)
+		return compareRecent(*a.LastAccess, a.Selector(), *b.LastAccess, b.Selector())
 	})
 	return recent[:min(limit, len(recent))], true
 }

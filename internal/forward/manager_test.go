@@ -16,15 +16,15 @@ import (
 )
 
 type stubBackend struct {
-	resolve func(context.Context, route.Target, string) ([]Destination, error)
+	resolve func(context.Context, route.Selector, string) ([]Destination, error)
 	open    func(context.Context, Destination, int) (Tunnel, error)
 }
 
-func (b stubBackend) Resolve(ctx context.Context, target route.Target, failed string) ([]Destination, error) {
+func (b stubBackend) Resolve(ctx context.Context, selector route.Selector, failed string) ([]Destination, error) {
 	if b.resolve != nil {
-		return b.resolve(ctx, target, failed)
+		return b.resolve(ctx, selector, failed)
 	}
-	return []Destination{stubDestination(target, "first")}, nil
+	return []Destination{stubDestination(selector, "first")}, nil
 }
 
 func (b stubBackend) Open(ctx context.Context, destination Destination, port int) (Tunnel, error) {
@@ -34,11 +34,17 @@ func (b stubBackend) Open(ctx context.Context, destination Destination, port int
 	return stubTunnel(), nil
 }
 
-func stubDestination(target route.Target, pod string) Destination {
+func stubDestination(selector route.Selector, pod string) Destination {
+	target := selector.Target
+	name := selector.PortName
+	if selector.IsDefault() {
+		name = "http"
+	}
 	if target.Port == 0 {
 		target.Port = 80
 	}
-	return Destination{Target: target, PortName: "http", DefaultPort: 80, Pod: pod, PodUID: pod, TargetPort: 8080}
+	return Destination{Target: target, PortName: name, DefaultPort: route.ResolvedSelector(target, "http"),
+		Pod: pod, PodUID: pod, TargetPort: 8080}
 }
 
 func stubTunnel() Tunnel {
@@ -52,8 +58,15 @@ func testManager(backend Backend) *Manager {
 }
 
 func request(service string) route.Request {
-	return route.Request{Target: route.Target{Context: "dev", Namespace: "default", Service: service},
+	return route.Request{Selector: route.Selector{Target: route.Target{Context: "dev", Namespace: "default", Service: service}},
 		Host: service + ".default.dev.kuri.localhost"}
+}
+
+func namedRequest(service, portName string) route.Request {
+	req := request(service)
+	req.PortName = portName
+	req.Host = portName + "." + req.Host
+	return req
 }
 
 func acquire(t *testing.T, m *Manager, req route.Request) *Lease {
@@ -124,14 +137,23 @@ func TestCloseReleasesEveryActiveForward(t *testing.T) {
 }
 
 func TestConcurrentColdRequest(t *testing.T) {
+	testConcurrentColdRequest(t, request("api"))
+}
+
+func TestConcurrentColdNamedRequest(t *testing.T) {
+	testConcurrentColdRequest(t, namedRequest("api", "web"))
+}
+
+func testConcurrentColdRequest(t *testing.T, req route.Request) {
+	t.Helper()
 	var resolves, opens atomic.Int64
 	resolving := make(chan struct{})
 	release := make(chan struct{})
 	manager := testManager(stubBackend{
-		resolve: func(_ context.Context, route route.Target, _ string) ([]Destination, error) {
+		resolve: func(_ context.Context, selector route.Selector, _ string) ([]Destination, error) {
 			resolves.Add(1)
 			<-resolving
-			return []Destination{stubDestination(route, "first")}, nil
+			return []Destination{stubDestination(selector, "first")}, nil
 		},
 		open: func(context.Context, Destination, int) (Tunnel, error) {
 			opens.Add(1)
@@ -147,7 +169,7 @@ func TestConcurrentColdRequest(t *testing.T) {
 	results := make(chan result, 12)
 	for range cap(results) {
 		go func() {
-			lease, err := manager.Acquire(t.Context(), request("api"))
+			lease, err := manager.Acquire(t.Context(), req)
 			results <- result{lease, err}
 		}()
 	}
@@ -192,22 +214,148 @@ func TestWarmExpiry(t *testing.T) {
 	})
 }
 
-func TestWarmRequestReusesTunnelDuringAPIFailure(t *testing.T) {
-	var calls atomic.Int64
-	manager := testManager(stubBackend{resolve: func(_ context.Context, target route.Target, _ string) ([]Destination, error) {
-		if calls.Add(1) > 1 {
-			return nil, errors.New("API is unavailable")
-		}
-		return []Destination{stubDestination(target, "first")}, nil
-	}})
-	defer manager.Close()
-	initial := acquire(t, manager, request("api"))
-	explicit := request("api")
-	explicit.Port = 80
-	explicit.Host = "80." + explicit.Host
-	if acquire(t, manager, explicit) != initial || acquire(t, manager, request("api")) != initial || calls.Load() != 1 {
-		t.Fatal("an established route required an API lookup")
+func TestWarmNamedRequestReusesDefaultForward(t *testing.T) {
+	defaultReq, namedReq := request("api"), namedRequest("api", "http")
+	for _, first := range []route.Request{defaultReq, namedReq} {
+		t.Run(first.Host, func(t *testing.T) {
+			var calls atomic.Int64
+			manager := testManager(stubBackend{resolve: func(_ context.Context, selector route.Selector, _ string) ([]Destination, error) {
+				if calls.Add(1) > 1 {
+					return nil, errors.New("API is unavailable")
+				}
+				return []Destination{stubDestination(selector, "first")}, nil
+			}})
+			defer manager.Close()
+			initial := acquire(t, manager, first)
+			if acquire(t, manager, namedReq) != initial || acquire(t, manager, defaultReq) != initial || calls.Load() != 1 {
+				t.Fatal("an established route required an API lookup")
+			}
+		})
 	}
+}
+
+func TestNamedForwardRecoveryRefreshesPort(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		defaultReq := request("api")
+		web, http := namedRequest("api", "web"), namedRequest("api", "http")
+		firstDone, resume := make(chan struct{}), make(chan struct{})
+		initial := Destination{Target: defaultReq.Target, PortName: "web", DefaultPort: web.Selector, PodUID: "old-pod", TargetPort: 3100}
+		initial.Port = 3000
+		updated := Destination{Target: defaultReq.Target, PortName: "web", DefaultPort: http.Selector, PodUID: "new-pod", TargetPort: 3200}
+		updated.Port = 3100
+		newDefault := Destination{Target: defaultReq.Target, PortName: "http", DefaultPort: http.Selector, PodUID: "new-pod", TargetPort: 8000}
+		newDefault.Port = 8000
+		manager := testManager(stubBackend{
+			resolve: func(ctx context.Context, selector route.Selector, failed string) ([]Destination, error) {
+				if failed != "" {
+					if failed != initial.PodUID || selector != web.Selector {
+						return nil, fmt.Errorf("unexpected recovery selector %+v, failed Pod %q", selector, failed)
+					}
+					select {
+					case <-resume:
+						return []Destination{updated}, nil
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+				select {
+				case <-resume:
+					if !selector.IsDefault() {
+						return nil, fmt.Errorf("unexpected second lookup %+v", selector)
+					}
+					return []Destination{newDefault}, nil
+				default:
+					return []Destination{initial}, nil
+				}
+			},
+			open: func(_ context.Context, dest Destination, _ int) (Tunnel, error) {
+				if dest == initial {
+					return Tunnel{Done: firstDone, Close: func() {}}, nil
+				}
+				return stubTunnel(), nil
+			},
+		})
+		defer manager.Close()
+		acquire(t, manager, defaultReq)
+		close(firstDone)
+		type result struct {
+			lease *Lease
+			err   error
+		}
+		ready := make(chan result, 1)
+		go func() {
+			lease, err := manager.Acquire(t.Context(), defaultReq)
+			ready <- result{lease, err}
+		}()
+		synctest.Wait()
+		if len(ready) != 0 {
+			t.Fatal("default request did not wait for the recovery")
+		}
+		close(resume)
+		if got := <-ready; got.err != nil || got.lease.Destination != newDefault {
+			t.Fatalf("waiting default request used the wrong port: %+v", got)
+		}
+		_, before := manager.RecentHistory()
+		for _, row := range before {
+			if row.PortName == "web" && row.DefaultPort {
+				t.Fatalf("previous default would still get a default copy URL: %+v", row)
+			}
+		}
+		time.Sleep(time.Millisecond)
+		if got := acquire(t, manager, web); got.Destination != updated {
+			t.Fatalf("named request used the wrong recovered port: %+v", got.Destination)
+		}
+		count, recent := manager.RecentHistory()
+		if count != 2 || len(recent) != 2 || recent[0].PortName != "web" || recent[0].Port != updated.Port || recent[0].DefaultPort {
+			t.Fatalf("unexpected recovered history: %d %+v", count, recent)
+		}
+	})
+}
+
+func TestNamedForwardRetiresWhenPortIsRenamed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		web, admin := namedRequest("api", "web"), namedRequest("api", "admin")
+		firstDone := make(chan struct{})
+		old := stubDestination(web.Selector, "old")
+		old.DefaultPort = web.Selector
+		renamed := stubDestination(admin.Selector, "replacement")
+		renamed.DefaultPort = admin.Selector
+		manager := testManager(stubBackend{
+			resolve: func(_ context.Context, selector route.Selector, failed string) ([]Destination, error) {
+				select {
+				case <-firstDone:
+					if selector == web.Selector {
+						return nil, errRouteUnavailable
+					}
+					if !selector.IsDefault() || failed != "" {
+						return nil, fmt.Errorf("unexpected resolution %+v after failure of %q", selector, failed)
+					}
+					return []Destination{renamed}, nil
+				default:
+					return []Destination{old}, nil
+				}
+			},
+			open: func(_ context.Context, dest Destination, _ int) (Tunnel, error) {
+				if dest == old {
+					return Tunnel{Done: firstDone, Close: func() {}}, nil
+				}
+				return stubTunnel(), nil
+			},
+		})
+		defer manager.Close()
+		acquire(t, manager, web)
+		close(firstDone)
+		synctest.Wait()
+		if rows := manager.Snapshot(); len(rows) != 0 {
+			t.Fatalf("removed name is still connected: %+v", rows)
+		}
+		if _, err := manager.Acquire(t.Context(), web); !errors.Is(err, errRouteUnavailable) {
+			t.Fatalf("old name did not fail: %v", err)
+		}
+		if got := acquire(t, manager, request("api")); got.Destination != renamed {
+			t.Fatalf("default route did not find the renamed port: %+v", got.Destination)
+		}
+	})
 }
 
 func TestProbeReconnectUntilExpiry(t *testing.T) {
@@ -291,11 +439,11 @@ func TestRecoveryTriesAlternateReadyPod(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var opened []string
 		manager := testManager(stubBackend{
-			resolve: func(_ context.Context, target route.Target, failed string) ([]Destination, error) {
+			resolve: func(_ context.Context, selector route.Selector, failed string) ([]Destination, error) {
 				if failed == "first" {
-					return []Destination{stubDestination(target, "alternate"), stubDestination(target, "first")}, nil
+					return []Destination{stubDestination(selector, "alternate"), stubDestination(selector, "first")}, nil
 				}
-				return []Destination{stubDestination(target, "first")}, nil
+				return []Destination{stubDestination(selector, "first")}, nil
 			},
 			open: func(_ context.Context, dest Destination, _ int) (Tunnel, error) {
 				opened = append(opened, dest.Pod)
@@ -376,15 +524,15 @@ func TestRecoveryRetriesWithoutRequestAndAppliesJitter(t *testing.T) {
 		attempts := make(chan time.Time, 2)
 		firstDone := make(chan struct{})
 		backend := stubBackend{
-			resolve: func(_ context.Context, target route.Target, failed string) ([]Destination, error) {
+			resolve: func(_ context.Context, selector route.Selector, failed string) ([]Destination, error) {
 				if failed == "" {
-					return []Destination{stubDestination(target, "first")}, nil
+					return []Destination{stubDestination(selector, "first")}, nil
 				}
 				attempts <- time.Now()
 				if len(attempts) == 1 {
 					return nil, errors.New("Kubernetes service not found")
 				}
-				return []Destination{stubDestination(target, "replacement")}, nil
+				return []Destination{stubDestination(selector, "replacement")}, nil
 			},
 			open: func(_ context.Context, destination Destination, _ int) (Tunnel, error) {
 				if destination.Pod == "first" {
@@ -432,9 +580,9 @@ func TestRecoveryDelayUsesRandomJitter(t *testing.T) {
 func TestConcurrentEphemeralRequestsWaitForPort(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var resolves atomic.Int64
-		manager := testManager(stubBackend{resolve: func(_ context.Context, target route.Target, _ string) ([]Destination, error) {
+		manager := testManager(stubBackend{resolve: func(_ context.Context, selector route.Selector, _ string) ([]Destination, error) {
 			resolves.Add(1)
-			return []Destination{stubDestination(target, "first")}, nil
+			return []Destination{stubDestination(selector, "first")}, nil
 		}})
 		defer manager.Close()
 		manager.UpdatePolicy(settings.PortForward{MinPort: 30000, MaxPort: 30000}, nil)
@@ -476,11 +624,11 @@ func TestConcurrentEphemeralRequestsWaitForPort(t *testing.T) {
 
 func TestEphemeralPortReservationReleasedOnLookupFailure(t *testing.T) {
 	var calls atomic.Int64
-	manager := testManager(stubBackend{resolve: func(_ context.Context, target route.Target, _ string) ([]Destination, error) {
+	manager := testManager(stubBackend{resolve: func(_ context.Context, selector route.Selector, _ string) ([]Destination, error) {
 		if calls.Add(1) == 1 {
 			return nil, errors.New("fixture lookup failed")
 		}
-		return []Destination{stubDestination(target, "first")}, nil
+		return []Destination{stubDestination(selector, "first")}, nil
 	}})
 	defer manager.Close()
 	manager.UpdatePolicy(settings.PortForward{MinPort: 30000, MaxPort: 30000}, nil)

@@ -28,9 +28,9 @@ HTTP activation. An explicit kuri start is available with automatic
 startup disabled.
 
 Hosts with the default service domain:
-  service.namespace.ctx.kuri.localhost       Use the service's default port.
-  port.service.namespace.ctx.kuri.localhost  Use the specified TCP service port.
-  service.namespace.kuri.localhost           Use the current Kubernetes context.
+  service.namespace.ctx.kuri.localhost           Use the Service's default port.
+  portName.service.namespace.ctx.kuri.localhost  Use the TCP port with this Service port name.
+  service.namespace.kuri.localhost               Use the current Kubernetes context.
 
 The default port is the only service port, or the TCP port named http.
 Use a lowercase DNS label for ctx. For other context names use ctx- followed
