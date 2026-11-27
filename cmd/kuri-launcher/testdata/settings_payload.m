@@ -192,6 +192,8 @@ int main(int argc, char **argv) {
             if (!kuriCommandKey(keyEvent(@"w", 8, NSEventModifierFlagCommand), 13, @"w")) abort();
             if (kuriCommandKey(keyEvent(@"w", 13, NSEventModifierFlagCommand | NSEventModifierFlagShift), 13, @"w")) abort();
             if (kuriCommandKey(keyEvent(@"w", 13, 0), 13, @"w")) abort();
+            if (kuriCommandKey(keyEvent(@"z", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
+            if (kuriCommandKey(keyEvent(@",", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
             ShortcutFixtureWindow *window = [[[ShortcutFixtureWindow alloc] initWithContentRect:NSMakeRect(0, 0, 120, 80)
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO] autorelease];
             for (NSString *characters in @[@"w", @"\u3148", @"\u0446"]) {
@@ -214,6 +216,10 @@ int main(int argc, char **argv) {
                 if (![status menuHasKeyEquivalent:status.rightMenu forEvent:keyEvent(characters, 12, NSEventModifierFlagCommand)
                     target:&target action:&action] || target != status || action != @selector(quit:)) abort();
             }
+            id target = nil;
+            SEL action = NULL;
+            if ([status menuHasKeyEquivalent:status.rightMenu forEvent:keyEvent(@"a", 12, NSEventModifierFlagCommand)
+                target:&target action:&action]) abort();
             KuriPopover *popover = [[[KuriPopover alloc] init] autorelease];
             [popover applyView:@{@"known": @YES, @"mode": @"stopped"}];
             NSView *settingsRow = [popover valueForKey:@"settingsButton"], *quitRow = [popover valueForKey:@"quitButton"];

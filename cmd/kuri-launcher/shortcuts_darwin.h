@@ -8,9 +8,15 @@ enum { KuriKeyQ = 12, KuriKeyW = 13 };
 static inline BOOL kuriCommandKey(NSEvent *event, unsigned short keyCode, NSString *character) {
     NSEventModifierFlags modifiers = NSEventModifierFlagCommand | NSEventModifierFlagShift |
         NSEventModifierFlagOption | NSEventModifierFlagControl;
-    return event.type == NSEventTypeKeyDown && !event.isARepeat &&
-        (event.modifierFlags & modifiers) == NSEventModifierFlagCommand &&
-        (event.keyCode == keyCode || [event.charactersIgnoringModifiers.lowercaseString isEqualToString:character]);
+    if (event.type != NSEventTypeKeyDown || event.isARepeat ||
+        (event.modifierFlags & modifiers) != NSEventModifierFlagCommand) return NO;
+    NSString *logical = event.charactersIgnoringModifiers.lowercaseString;
+    if ([logical isEqualToString:character]) return YES;
+    if (logical.length == 1) {
+        unichar value = [logical characterAtIndex:0];
+        if (value >= 0x20 && value <= 0x7e) return NO;
+    }
+    return event.keyCode == keyCode;
 }
 
 #endif
