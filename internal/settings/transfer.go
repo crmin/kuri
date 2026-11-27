@@ -109,6 +109,9 @@ func DecodeTransfer(source io.Reader, contextNames []string) (Transfer, error) {
 			if domain := fields["domain"]; domain != nil && domain.Tag != "!!str" && domain.Tag != "!!null" {
 				return Transfer{}, errTransferFormat
 			}
+			if !transferIntegers(fields, "port") {
+				return Transfer{}, errTransferFormat
+			}
 			if err := node.Decode(&result.Server); err != nil {
 				return Transfer{}, errTransferFormat
 			}
@@ -118,6 +121,9 @@ func DecodeTransfer(source io.Reader, contextNames []string) (Transfer, error) {
 				}
 			}
 		case "port_forward":
+			if !transferIntegers(fields, "min_port", "max_port", "connection_check_interval_seconds") {
+				return Transfer{}, errTransferFormat
+			}
 			if err := node.Decode(&result.Forward); err != nil {
 				return Transfer{}, errTransferFormat
 			}
@@ -129,7 +135,7 @@ func DecodeTransfer(source io.Reader, contextNames []string) (Transfer, error) {
 			}
 		case "kubernetes":
 			if aliases := fields["context_aliases"]; aliases != nil {
-				values, err := transferMapping(aliases)
+				values, err := transferAliasMapping(aliases, fields["config_path"])
 				if err != nil {
 					return Transfer{}, err
 				}
@@ -154,6 +160,37 @@ func DecodeTransfer(source io.Reader, contextNames []string) (Transfer, error) {
 		return Transfer{}, errTransferFormat
 	}
 	return result, nil
+}
+
+func transferIntegers(fields map[string]*yaml.Node, keys ...string) bool {
+	for _, key := range keys {
+		if value := fields[key]; value != nil && value.ShortTag() != "!!int" && value.ShortTag() != "!!null" {
+			return false
+		}
+	}
+	return true
+}
+
+// A local settings file carries the source profile. Only that profile's
+// aliases are portable; the destination always uses its own kubeconfig.
+func transferAliasMapping(aliases, sourcePath *yaml.Node) (map[string]*yaml.Node, error) {
+	values, err := transferMapping(aliases)
+	if err != nil || sourcePath == nil {
+		return values, err
+	}
+	for key, value := range values {
+		if !filepath.IsAbs(key) || value.Kind != yaml.MappingNode {
+			continue
+		}
+		if sourcePath.Kind != yaml.ScalarNode || sourcePath.Tag != "!!str" {
+			return nil, errTransferFormat
+		}
+		if profile := values[sourcePath.Value]; profile != nil {
+			return transferMapping(profile)
+		}
+		return nil, nil
+	}
+	return values, nil
 }
 
 func transferMapping(node *yaml.Node) (map[string]*yaml.Node, error) {

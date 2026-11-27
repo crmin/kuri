@@ -101,6 +101,58 @@ func TestExportContextAliasesUsesActiveKubeconfig(t *testing.T) {
 	}
 }
 
+func TestImportIntegerFieldsRejectFractionalYAML(t *testing.T) {
+	for _, input := range []string{
+		"server: {port: 8080.9}",
+		"port_forward: {min_port: 30000.9}",
+		"port_forward: {max_port: 39999.9}",
+		"port_forward: {connection_check_interval_seconds: 1.9}",
+	} {
+		if _, err := DecodeTransfer(strings.NewReader(input), nil); err != errTransferFormat {
+			t.Errorf("accepted %q: %v", input, err)
+		}
+	}
+	input := `server: {port: null}
+port_forward: {keep_alive_minutes: 1.75, future_port: 1.9}`
+	transfer, err := DecodeTransfer(strings.NewReader(input), nil)
+	if err != nil || !slices.Equal(transfer.Fields(), []TransferField{TransferMinutes}) || *transfer.Forward.Minutes != 1.75 {
+		t.Fatalf("valid transfer: %+v, %v", transfer, err)
+	}
+}
+
+func TestImportLocalSettingsUsesSourceAliasProfile(t *testing.T) {
+	store := NewStore(t.TempDir())
+	_, _, err := store.Update(t.Context(), func(c *Config) error {
+		c.Kubernetes.ConfigPath = "/source/other"
+		c.Kubernetes.MergeAliases(map[string]string{"dev": "other", "test": "other-test"})
+		c.Kubernetes.ConfigPath = "/source/current"
+		c.Kubernetes.MergeAliases(map[string]string{"dev": "source-dev", "absent": "source-absent"})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err := ReadTransfer(store.Path(), []string{"dev", "test"})
+	if err != nil || transfer.Kubernetes == nil || len(transfer.Kubernetes.Aliases) != 1 || transfer.Kubernetes.Aliases["dev"] != "source-dev" {
+		t.Fatalf("source profile: %+v, %v", transfer.Kubernetes, err)
+	}
+	_, _, err = store.Update(t.Context(), func(c *Config) error {
+		c.Kubernetes.ConfigPath = "/source/default"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err = ReadTransfer(store.Path(), []string{"dev", "test"})
+	if err != nil || transfer.Kubernetes != nil {
+		t.Fatalf("aliases from an inactive profile: %+v, %v", transfer.Kubernetes, err)
+	}
+	portable, err := DecodeTransfer(strings.NewReader("kubernetes: {config_path: /unused, context_aliases: {dev: portable}}"), []string{"dev"})
+	if err != nil || portable.Kubernetes == nil || portable.Kubernetes.Aliases["dev"] != "portable" {
+		t.Fatalf("portable aliases with an extra field: %+v, %v", portable.Kubernetes, err)
+	}
+}
+
 func TestExportRefusesActiveSettingsPath(t *testing.T) {
 	store := NewStore(t.TempDir())
 	if _, err := store.Ensure(t.Context()); err != nil {
