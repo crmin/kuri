@@ -229,12 +229,15 @@ int main(int argc, char **argv) {
         if (argc == 2 && strcmp(argv[1], "shortcuts") == 0) {
             [NSApplication sharedApplication];
             if (!kuriCommandKey(keyEvent(@"\u3148", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
+            if (!kuriCommandKey(keyEvent(@"", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
             if (!kuriCommandKey(keyEvent(@"\u3142", 12, NSEventModifierFlagCommand), 12, @"q")) abort();
             if (!kuriCommandKey(keyEvent(@"w", 8, NSEventModifierFlagCommand), 13, @"w")) abort();
             if (kuriCommandKey(keyEvent(@"w", 13, NSEventModifierFlagCommand | NSEventModifierFlagShift), 13, @"w")) abort();
             if (kuriCommandKey(keyEvent(@"w", 13, 0), 13, @"w")) abort();
             if (kuriCommandKey(keyEvent(@"z", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
             if (kuriCommandKey(keyEvent(@",", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
+            if (kuriCommandKey(keyEvent(@"\u00e9", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
+            if (kuriCommandKey(keyEvent(@"\u00f8", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
             ShortcutFixtureWindow *window = [[[ShortcutFixtureWindow alloc] initWithContentRect:NSMakeRect(0, 0, 120, 80)
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO] autorelease];
             for (NSString *characters in @[@"w", @"\u3148", @"\u0446"]) {

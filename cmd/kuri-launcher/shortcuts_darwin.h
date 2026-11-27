@@ -16,6 +16,7 @@ static inline BOOL kuriCommandKey(NSEvent *event, unsigned short keyCode, NSStri
         unichar value = [logical characterAtIndex:0];
         if (value >= 0x20 && value <= 0x7e) return NO;
     }
+    if (logical.length && [logical rangeOfString:@"\\A\\p{Latin}\\p{M}*\\z" options:NSRegularExpressionSearch].location != NSNotFound) return NO;
     return event.keyCode == keyCode;
 }
 
