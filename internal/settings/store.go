@@ -145,7 +145,6 @@ func (s Store) write(cfg Config) error {
 }
 
 func (s Store) writeAt(cfg Config, path string) error {
-	dir := s.Directory()
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
@@ -153,7 +152,11 @@ func (s Store) writeAt(cfg Config, path string) error {
 	if len(data) > maxSettingsSize {
 		return errors.New("The kuri settings file exceeds 1 MiB.")
 	}
-	file, err := os.CreateTemp(dir, ".settings-*.yaml")
+	return s.replaceFile(path, data)
+}
+
+func (s Store) replaceFile(path string, data []byte) error {
+	file, err := os.CreateTemp(s.Directory(), ".settings-*")
 	if err != nil {
 		return err
 	}

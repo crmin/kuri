@@ -14,9 +14,10 @@ import (
 )
 
 type activationRequest struct {
-	mode    string
-	conn    *net.UnixConn
-	handoff bool
+	mode      string
+	conn      *net.UnixConn
+	handoff   bool
+	automatic bool
 }
 
 func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager bool) error {
@@ -46,7 +47,22 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 		allowed, err := store.AutoStart(ctx)
 		return err == nil && allowed
 	}
-	eager = eager && !controlRequestQueued(sockets.Control) && allowAutomatic()
+	allowPassive := func() bool {
+		if suppressed {
+			return false
+		}
+		var allowed bool
+		err := store.WithSnapshot(ctx, func(cfg settings.Config) error {
+			if !cfg.General.AutoStart {
+				return nil
+			}
+			var err error
+			allowed, err = store.PassiveStartAllowedLocked()
+			return err
+		})
+		return err == nil && allowed
+	}
+	eager = eager && !controlRequestQueued(sockets.Control) && allowPassive()
 	claims := make(chan activationRequest)
 	chosen := make(chan struct{})
 	info := reply{State: State{Port: port}}
@@ -66,7 +82,7 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 				case <-chosen:
 					return true
 				default:
-					return allowAutomatic()
+					return allowPassive()
 				}
 			})
 			listeners = append(listeners, first)
@@ -95,6 +111,8 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 
 	activated := *app
 	activated.activated = true
+	activated.automaticStart = selected.automatic || selected.conn == nil
+	activated.passiveStart = selected.conn == nil
 	if suppressed {
 		recovery, err := store.Recovery(change.ID)
 		if err != nil {
@@ -107,7 +125,11 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 		activated.recovery = recovery
 	}
 	if selected.conn == nil {
-		return activated.serve(ctx, selected.mode, listeners, nil, nil)
+		err := activated.serve(ctx, selected.mode, listeners, nil, nil)
+		if errors.Is(err, ErrAutoStartDisabled) {
+			return nil
+		}
+		return err
 	}
 	defer selected.conn.Close()
 	return activated.serveActivation(ctx, cancel, listeners, selected)
@@ -167,7 +189,7 @@ func acceptActivation(ctx context.Context, listener *net.UnixListener, claims ch
 				return
 			}
 			select {
-			case claims <- activationRequest{mode: req.Action, conn: conn, handoff: req.ForegroundHandoff}:
+			case claims <- activationRequest{mode: req.Action, conn: conn, handoff: req.ForegroundHandoff, automatic: req.Automatic}:
 				// The server now owns the startup connection.
 			case <-chosen:
 				_ = writeReply(conn, failure(ErrAlreadyRunning))

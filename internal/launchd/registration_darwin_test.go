@@ -32,6 +32,33 @@ func TestStartupRegistrationStateForOldAndNewPlists(t *testing.T) {
 	}
 }
 
+func TestStopRejectsIncompatibleLoadedRegistration(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("registration executable is never probed as root")
+	}
+	program := filepath.Join(t.TempDir(), "kuri")
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	reg := Registration{Program: program}
+	for _, state := range []string{"running", "not running"} {
+		loaded := "\tpath = " + registrationPath + "\n\tprogram = " + program + "\n\tstate = " + state + "\n"
+		if err := checkProxyPauseSupport(t.Context(), reg, loaded); err == nil || !strings.Contains(err.Error(), "Update Proxy Registration") {
+			t.Fatalf("%s old service: %v", state, err)
+		}
+	}
+	if err := checkProxyPauseSupport(t.Context(), reg, ""); err != nil {
+		t.Fatalf("unloaded service: %v", err)
+	}
+	if err := os.WriteFile(program, []byte("#!/bin/sh\n[ \"$1\" = __proxy_pause_version ] && printf '1\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	loaded := "\tpath = " + registrationPath + "\n\tprogram = " + program + "\n"
+	if err := checkProxyPauseSupport(t.Context(), reg, loaded); err != nil {
+		t.Fatalf("compatible service: %v", err)
+	}
+}
+
 func TestUpgradePolicyReplacesOnlyManagedExecutable(t *testing.T) {
 	system := newStartupTestSystem(t)
 	original := system.executable(t, "original")

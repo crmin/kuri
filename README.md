@@ -22,7 +22,7 @@ Finder에서 앱이 시작되지 않으면 `~/Library/Logs/kuri/startup.log`에�
 
 메뉴 막대의 kuri 아이콘을 좌클릭하면 서버 PID, 가동 시간, 활성 포트포워딩 수를 확인할 수 있습니다. 스위치로 프록시를 시작하거나 중지합니다. `Recent Services`에 포인터를 올리면 최근 접속한 서비스가 최대 10개 표시됩니다. 항목을 누르면 현재 설정에 맞는 URL을 복사합니다. 우클릭 메뉴에서도 `Start`와 `Stop`을 사용할 수 있습니다.
 
-`Quit` 또는 `Command+Q`는 프록시와 포트포워딩을 종료하고 앱을 닫습니다. 현재 부팅 세션에서 자동 시작을 다시 허용하려면 앱을 다시 열거나 `kuri start`를 실행합니다. 앱을 다시 열 때는 General의 자동 시작 옵션을 따릅니다.
+`Quit` 또는 `Command+Q`는 프록시와 포트포워딩을 종료하고 앱을 닫습니다. launchd가 예약한 수신 포트는 그대로 유지됩니다. 등록된 프록시가 현재 버전이면 `Start`, `Stop`, `Quit`에 관리자 인증이 필요 없습니다. 중지 후에는 `Start`를 누르거나 앱의 자동 시작을 켠 상태에서 kuri를 다시 엽니다.
 
 ### Settings
 
@@ -66,7 +66,7 @@ kuri start
 
 To run the server in the foreground and view logs, run `kuri`. If kuri needs to register its LaunchDaemon on the first run, it asks for administrator approval once, then starts the server as part of the same command. If a LaunchDaemon is already registered for your account, kuri reuses it.
 
-launchd can reserve the configured port on both loopback addresses so kuri can run with standard user privileges. When automatic startup is enabled, an incoming HTTP request can start a stopped, registered proxy.
+launchd can reserve the configured port on both loopback addresses so kuri can run with standard user privileges. When automatic startup is enabled, an incoming HTTP request can start a registered proxy before the first intentional stop in this boot.
 
 ## Start at boot
 
@@ -81,7 +81,7 @@ CGO_ENABLED=1 go build -o kuri .
 
 To update kuri, run `./kuri install` again from the directory where you built the new binary. If the startup job is already registered, `install` only updates the link. The server uses the new binary the next time it starts. If you move the binary, run the install command again from its new location.
 
-같은 부팅 세션에서 Quit로 자동 시작을 일시 중지했다면 앱을 다시 열거나 새 CLI의 `kuri start`를 실행해 재개합니다. 그다음 `./kuri install`을 실행합니다.
+After `kuri stop` or app `Quit`, automatic startup is paused for the current boot. A job unloaded by an earlier version may need administrator approval the first time you resume it.
 
 To remove the startup registration, run the following command.
 
@@ -89,7 +89,7 @@ To remove the startup registration, run the following command.
 kuri uninstall
 ```
 
-`uninstall` removes the startup job and its symbolic link. It also stops the LaunchDaemon if it is running. When a launchd registration remains in place and automatic startup is enabled, an HTTP connection can start the proxy after `kuri stop`.
+`uninstall` removes the startup job and its symbolic link. It also stops the LaunchDaemon if it is running.
 
 If your kubeconfig uses exec authentication, the account that runs kuri must be able to authenticate without terminal input. The `PATH` in the plist includes the Homebrew and standard macOS binary directories.
 

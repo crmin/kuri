@@ -26,6 +26,8 @@ type App struct {
 	home, activation string
 	detached         bool
 	activated        bool
+	automaticStart   bool
+	passiveStart     bool
 	handoff          *foregroundHandoff
 	localHandoff     chan string
 	recovery         *settings.Config

@@ -159,6 +159,18 @@ func (app *App) prepareRuntime(ctx context.Context, listeners []net.Listener, lo
 		}
 		var control *net.UnixListener
 		err = store.WithSnapshot(ctx, func(latest settings.Config) error {
+			if app.automaticStart && !latest.General.AutoStart {
+				return ErrAutoStartDisabled
+			}
+			if app.passiveStart {
+				allowed, err := store.PassiveStartAllowedLocked()
+				if err != nil {
+					return err
+				}
+				if !allowed {
+					return ErrAutoStartDisabled
+				}
+			}
 			if latest.Fingerprint() != saved.Fingerprint() {
 				return ErrSettingsChanged
 			}

@@ -90,6 +90,10 @@ func decodeRegistration(raw []byte, account, home string) (Registration, error) 
 }
 
 func (r Registration) SupportsSettings(ctx context.Context) bool {
+	return r.supports(ctx, "__settings_version")
+}
+
+func (r Registration) supports(ctx context.Context, command string) bool {
 	if !r.Present() {
 		return true
 	}
@@ -98,8 +102,61 @@ func (r Registration) SupportsSettings(ctx context.Context) bool {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	answer, err := exec.CommandContext(ctx, r.Program, "__settings_version").Output()
+	answer, err := exec.CommandContext(ctx, r.Program, command).Output()
 	return err == nil && strings.TrimSpace(string(answer)) == "1"
+}
+
+func (r Registration) SupportsProxyPause(ctx context.Context) bool {
+	return r.supports(ctx, "__proxy_pause_version")
+}
+
+func CheckProxyPauseSupport(ctx context.Context, home string) error {
+	reg, err := Registered(ctx, home)
+	if errors.Is(err, ErrOtherRegistration) {
+		return nil
+	}
+	if err != nil || !reg.Present() {
+		return err
+	}
+	loaded, err := loadedRegistration(ctx)
+	if err != nil {
+		return err
+	}
+	return checkProxyPauseSupport(ctx, reg, loaded)
+}
+
+func checkProxyPauseSupport(ctx context.Context, reg Registration, loaded string) error {
+	if loaded == "" {
+		return nil
+	}
+	var path, program string
+	for line := range strings.SplitSeq(loaded, "\n") {
+		if value, ok := strings.CutPrefix(line, "\tpath = "); ok {
+			path = value
+		}
+		if value, ok := strings.CutPrefix(line, "\tprogram = "); ok {
+			program = value
+		}
+	}
+	if path != registrationPath || program != reg.Program {
+		return errors.New("The loaded kuri LaunchDaemon differs from its registered configuration.")
+	}
+	if !reg.SupportsProxyPause(ctx) {
+		return errors.New("Update Proxy Registration in kuri Settings before stopping the proxy.")
+	}
+	return nil
+}
+
+func loadedRegistration(ctx context.Context) (string, error) {
+	output, err := exec.CommandContext(ctx, "/bin/launchctl", "print", serviceTarget).Output()
+	if err == nil {
+		return string(output), nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 113 {
+		return "", nil
+	}
+	return "", fmt.Errorf("check the kuri LaunchDaemon: %w", err)
 }
 
 func EnsurePolicySupport(ctx context.Context, home string, stderr io.Writer) error {

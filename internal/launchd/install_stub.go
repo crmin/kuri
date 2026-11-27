@@ -37,6 +37,10 @@ func Registered(context.Context, string) (Registration, error) { return Registra
 
 func (r Registration) SupportsSettings(context.Context) bool { return !r.Present() }
 
+func (r Registration) SupportsProxyPause(context.Context) bool { return !r.Present() }
+
+func CheckProxyPauseSupport(context.Context, string) error { return nil }
+
 func EnsurePolicySupport(context.Context, string, io.Writer) error { return nil }
 
 func ReadPortChange() (PortChange, error) { return PortChange{}, nil }
