@@ -4,6 +4,7 @@ package launchd
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,7 +45,20 @@ func Registered(ctx context.Context, home string) (Registration, error) {
 	if err != nil {
 		return Registration{}, fmt.Errorf("read kuri LaunchDaemon registration: %w", err)
 	}
-	return decodeRegistration(raw, account, home)
+	registration, err := decodeRegistration(raw, account, home)
+	if err == nil && registration.Program == startupLink {
+		target, linkErr := os.Readlink(startupLink)
+		registration.AppStartup = linkErr == nil && appStartupTarget(home, target)
+	}
+	return registration, err
+}
+
+func appStartupTarget(home, target string) bool {
+	dir := filepath.Dir(target)
+	hash := filepath.Base(dir)
+	_, err := hex.DecodeString(hash)
+	return err == nil && len(hash) == 64 && strings.ToLower(hash) == hash &&
+		target == filepath.Join(home, ".kuri", "installed", hash, "kuri")
 }
 
 func decodeRegistration(raw []byte, account, home string) (Registration, error) {
@@ -160,11 +174,19 @@ func loadedRegistration(ctx context.Context) (string, error) {
 }
 
 func EnsurePolicySupport(ctx context.Context, home string, stderr io.Writer) error {
+	return ensureProgramSupport(ctx, home, stderr, Registration.SupportsSettings)
+}
+
+func EnsureProxyPauseSupport(ctx context.Context, home string, stderr io.Writer) error {
+	return ensureProgramSupport(ctx, home, stderr, Registration.SupportsProxyPause)
+}
+
+func ensureProgramSupport(ctx context.Context, home string, stderr io.Writer, supports func(Registration, context.Context) bool) error {
 	registration, err := Registered(ctx, home)
 	if err != nil {
 		return err
 	}
-	if registration.SupportsSettings(ctx) {
+	if supports(registration, ctx) {
 		return nil
 	}
 	if registration.Program != managedProgram {
@@ -184,7 +206,7 @@ func EnsurePolicySupport(ctx context.Context, home string, stderr io.Writer) err
 	}); err != nil {
 		return err
 	}
-	if !registration.SupportsSettings(ctx) {
+	if !supports(registration, ctx) {
 		return errors.New("Update the installed kuri binary to apply the saved settings.")
 	}
 	return nil

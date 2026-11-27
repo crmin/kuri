@@ -42,10 +42,11 @@ func TestAutomaticPublicationHonorsLastStop(t *testing.T) {
 
 func TestAutoStartPolicyForBootHTTPAndManual(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		eager, paused bool
+		name                   string
+		eager, paused, enabled bool
 	}{
 		{name: "http"}, {name: "boot", eager: true},
+		{name: "socket-only", enabled: true},
 		{name: "stopped-http", paused: true}, {name: "stopped-boot", eager: true, paused: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,7 +59,7 @@ func TestAutoStartPolicyForBootHTTPAndManual(t *testing.T) {
 				if err := store.SetProxyPaused(t.Context(), true); err != nil {
 					t.Fatal(err)
 				}
-			} else {
+			} else if !tc.enabled {
 				if _, _, err := store.Update(t.Context(), func(c *settings.Config) error {
 					c.General.AutoStart = false
 					return nil

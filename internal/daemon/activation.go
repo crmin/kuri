@@ -47,8 +47,9 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 		allowed, err := store.AutoStart(ctx)
 		return err == nil && allowed
 	}
+	allowAutonomous := eager
 	allowPassive := func() bool {
-		if suppressed {
+		if !allowAutonomous || suppressed {
 			return false
 		}
 		var allowed bool

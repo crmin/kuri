@@ -164,5 +164,13 @@ func runActivated(ctx context.Context, app *daemon.App, eager bool) error {
 	if err != nil {
 		return err
 	}
+	if eager && os.Getenv("KURI_LAUNCHD_START") == "1" {
+		registration, err := app.Registration(ctx)
+		if err != nil {
+			sockets.Close()
+			return err
+		}
+		eager = !registration.AppStartup
+	}
 	return app.RunActivated(ctx, sockets, eager)
 }

@@ -28,7 +28,7 @@ func settingsFixtureOutput(t *testing.T, args ...string) []byte {
 		t.Fatal(err)
 	}
 	fixture := filepath.Join(dir, "settings_payload")
-	command := exec.CommandContext(t.Context(), "xcrun", "clang", "-framework", "AppKit", "-I", ".", source, "settings_darwin.m", "-o", fixture)
+	command := exec.CommandContext(t.Context(), "xcrun", "clang", "-framework", "AppKit", "-framework", "ServiceManagement", "-I", ".", source, "settings_darwin.m", "-o", fixture)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("compile settings fixture: %v\n%s", err, output)
 	}
@@ -37,6 +37,18 @@ func settingsFixtureOutput(t *testing.T, args ...string) []byte {
 		t.Fatalf("run settings fixture: %v", err)
 	}
 	return output
+}
+
+func TestLoginItemSettingsRefresh(t *testing.T) {
+	got := strings.TrimSpace(string(settingsFixtureOutput(t, "login-item")))
+	want := strings.Join([]string{
+		"Open at Login", "Open System Settings",
+		"Under Open at Login, click +, select kuri, and click Add.",
+		"openLoginItemsSettings:",
+	}, "\n")
+	if got != want {
+		t.Fatalf("login item row: got %q, want %q", got, want)
+	}
 }
 
 func TestSettingsDomainStyleLabel(t *testing.T) {
@@ -91,7 +103,6 @@ func TestSettingsEditPayloads(t *testing.T) {
 	}
 	for _, on := range []bool{true, false} {
 		suffix := "/" + strconv.FormatBool(on)
-		check("register"+suffix, settings.Edit{Register: new(on)})
 		check("auto_start"+suffix, settings.Edit{AutoStart: new(on)})
 		check("keep_alive"+suffix, settings.Edit{KeepAlive: new(on)})
 		for _, style := range []string{"explicit_context", "explicit_port", "current_context"} {

@@ -62,6 +62,62 @@ func TestStartupRegistrationLifecycle(t *testing.T) {
 	}
 }
 
+func TestMigratesAppStartupRegistration(t *testing.T) {
+	system := newStartupTestSystem(t)
+	home := filepath.Join(system.root, "home")
+	appBinary := filepath.Join(home, ".kuri", "installed", strings.Repeat("a", 64), "kuri")
+	if err := os.MkdirAll(filepath.Dir(appBinary), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(appBinary, []byte("previous app"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := system.runScript(t, true, "--startup-install", appBinary, system.account, system.template(), "8080"); code != 0 {
+		t.Fatalf("install previous app: %d %s", code, out)
+	}
+	newBinary := system.executable(t, "new app")
+	if out, code := system.run(t, "convert-app", newBinary, false); code != 77 {
+		t.Fatalf("unauthorized conversion: %d %s", code, out)
+	}
+	system.flag(t, "fail-bootstrap")
+	if out, code := system.run(t, "convert-app", newBinary, true); code == 0 {
+		t.Fatalf("failed bootstrap reported success: %s", out)
+	}
+	system.checkLink(t, appBinary)
+	system.checkPlist(t, "RunAtLoad", "true")
+	managed := filepath.Join(system.root, "support", "kuri")
+	if _, err := os.Stat(managed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed conversion left the managed binary: %v", err)
+	}
+	if out, code := system.run(t, "convert-app", newBinary, true); code != 0 {
+		t.Fatalf("convert app: %d %s", code, out)
+	}
+	system.checkPlist(t, "ProgramArguments.0", managed)
+	system.checkPlist(t, "ProgramArguments.1", "__launchd")
+	system.checkPlist(t, "RunAtLoad", "false")
+	system.checkPlist(t, "Sockets.HTTP.0.SockServiceName", "8080")
+	system.checkPlist(t, "Sockets.HTTP.1.SockServiceName", "8080")
+	if _, err := os.Lstat(system.link); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("conversion left the old app link: %v", err)
+	}
+}
+
+func TestStandaloneStartupRegistrationPreserved(t *testing.T) {
+	system := newStartupTestSystem(t)
+	cli := system.executable(t, "installed CLI")
+	if out, code := system.run(t, "install", cli, true); code != 0 {
+		t.Fatalf("install CLI: %d %s", code, out)
+	}
+	if out, code := system.run(t, "convert-app", system.executable(t, "app"), true); code == 0 || !strings.Contains(out, "belongs to the kuri CLI") {
+		t.Fatalf("convert standalone CLI: %d %s", code, out)
+	}
+	system.checkLink(t, cli)
+	system.checkPlist(t, "RunAtLoad", "true")
+	if got := system.changes(t); got != "bootstrap\n" {
+		t.Fatalf("conversion affected the CLI job: %q", got)
+	}
+}
+
 func TestStartupRequestsApprovalOnlyWhenNeeded(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("administrator invocation does not request approval")

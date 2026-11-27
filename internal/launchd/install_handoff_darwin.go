@@ -11,18 +11,12 @@ import (
 	"time"
 )
 
-func InstallSettingsStartup(ctx context.Context, home, source string, stdout, stderr io.Writer, handoff func(context.Context) error) error {
+func ConvertAppStartup(ctx context.Context, home, source string, stderr io.Writer, handoff func(context.Context) error) error {
 	if handoff == nil {
-		return changeStartup(ctx, "install", source, stdout, stderr, "--keep-paused")
+		return changeStartup(ctx, "convert-app", source, io.Discard, stderr)
 	}
 	return runStartupHandoff(ctx, home, handoff, func(ctx context.Context, dir string) error {
-		return changeStartup(ctx, "install", source, stdout, stderr, "--keep-paused", dir)
-	})
-}
-
-func UninstallSettingsStartup(ctx context.Context, home string, stderr io.Writer, save func(context.Context) error) error {
-	return runStartupHandoff(ctx, home, save, func(ctx context.Context, dir string) error {
-		return changeStartup(ctx, "uninstall", "", io.Discard, stderr, "80", "", dir)
+		return changeStartup(ctx, "convert-app", source, io.Discard, stderr, "80", "", dir)
 	})
 }
 

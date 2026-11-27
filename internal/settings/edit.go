@@ -7,19 +7,20 @@ import (
 )
 
 type Edit struct {
-	AutoStart  *bool        `json:"auto_start,omitempty"`
-	Register   *bool        `json:"register,omitempty"`
-	ConfigPath *string      `json:"config_path,omitempty"`
-	Context    *ContextEdit `json:"context,omitempty"`
-	Style      *StyleEdit   `json:"style,omitempty"`
-	KeepAlive  *bool        `json:"keep_alive,omitempty"`
-	Trigger    *string      `json:"trigger,omitempty"`
-	Domain     *string      `json:"domain,omitempty"`
-	Port       *string      `json:"port,omitempty"`
-	Minutes    *string      `json:"minutes,omitempty"`
-	MinPort    *string      `json:"min_port,omitempty"`
-	MaxPort    *string      `json:"max_port,omitempty"`
-	Reset      bool         `json:"reset,omitempty"`
+	AutoStart    *bool        `json:"auto_start,omitempty"`
+	PrepareProxy bool         `json:"prepare_proxy,omitempty"`
+	Register     *bool        `json:"register,omitempty"`
+	ConfigPath   *string      `json:"config_path,omitempty"`
+	Context      *ContextEdit `json:"context,omitempty"`
+	Style        *StyleEdit   `json:"style,omitempty"`
+	KeepAlive    *bool        `json:"keep_alive,omitempty"`
+	Trigger      *string      `json:"trigger,omitempty"`
+	Domain       *string      `json:"domain,omitempty"`
+	Port         *string      `json:"port,omitempty"`
+	Minutes      *string      `json:"minutes,omitempty"`
+	MinPort      *string      `json:"min_port,omitempty"`
+	MaxPort      *string      `json:"max_port,omitempty"`
+	Reset        bool         `json:"reset,omitempty"`
 }
 
 type ContextEdit struct {
@@ -35,9 +36,6 @@ type StyleEdit struct {
 func (e Edit) Apply(c *Config) error {
 	if e.AutoStart != nil {
 		c.General.AutoStart = *e.AutoStart
-	}
-	if e.Register != nil {
-		c.General.LaunchAtLogin = *e.Register
 	}
 	if e.ConfigPath != nil && c.Kubernetes.ConfigPath != *e.ConfigPath {
 		c.Kubernetes.ConfigPath = *e.ConfigPath

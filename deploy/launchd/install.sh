@@ -228,6 +228,14 @@ restore_startup() {
     if [ -n "$plist_stage" ] && [ -f "$plist_stage/original.pause" ]; then
         /bin/mv -fh "$plist_stage/original.pause" "$pause_file" || return 1
     fi
+    if "${program_changed:-false}"; then
+        if [ -f "$staging/original.program" ]; then
+            /bin/mv -fh "$staging/original.program" "$program" || return 1
+        else
+            /bin/rm -f "$program" || return 1
+        fi
+    fi
+    if "${link_removed:-false}"; then binary=$original_link; change_link replace || return 1; fi
     if "$link_created"; then change_link remove || return 1; fi
     if "$disabled_changed"; then /bin/launchctl disable "system/$label" || return 1; fi
     if "$bootout_attempted" && ! /bin/launchctl print "system/$label" >/dev/null 2>&1; then
@@ -239,9 +247,9 @@ finish_startup() {
     result=$?
     trap - EXIT
     if [ "$result" -ne 0 ] && ! restore_startup; then
-        printf 'Could not restore the previous kuri installation. Inspect %s and %s. Backup: %s\n' \
-            "$plist" "$link" "${plist_stage:-none}" >&2
-        plist_stage=
+        printf 'Could not restore the previous kuri installation. Inspect %s and %s. Backups: %s %s\n' \
+            "$plist" "$link" "${plist_stage:-none}" "${staging:-none}" >&2
+        plist_stage= staging=
     fi
     if [ -n "$plist_stage" ]; then /bin/rm -rf "$plist_stage"; fi
     if [ -n "$record" ]; then /bin/rm -f "$record"; fi
@@ -273,6 +281,56 @@ await_startup_handoff() {
     ' kuri-startup-handoff "$handoff_directory" || fail 'The kuri settings operation did not complete.'
 }
 
+convert_app_startup() {
+    [ "$registered" = startup ] && [ -L "$link" ] || fail 'No previous kuri app startup registration was found.'
+    original_link=$(/usr/bin/readlink "$link")
+    installed_dir="$home/.kuri/installed/"
+    case "$original_link" in "$installed_dir"*/kuri) ;; *) fail 'This registration belongs to the kuri CLI.' ;; esac
+    digest_dir=${original_link#"$installed_dir"}
+    digest_dir=${digest_dir%/kuri}
+    case "$digest_dir" in ''|*[!0-9a-f]*) fail 'Invalid kuri app executable path.' ;; esac
+    [ "${#digest_dir}" -eq 64 ] && trusted_path "$original_link" && trusted_path "$bin_directory" ||
+        fail 'Unsafe kuri app startup registration.'
+    if exists "$program"; then
+        [ -f "$program" ] && protected_by_root "$program" || fail 'Unsafe kuri executable.'
+    fi
+    read_menu_pause
+    case "$pause_stage" in
+        ''|completed) ;;
+        paused)
+            digest=$(/usr/bin/shasum -a 256 < "$plist" | /usr/bin/awk '{print $1}')
+            [ "$saved_uid" = "$uid" ] && [ "$saved_digest" = "$digest" ] && [ -z "$loaded_job" ] ||
+                fail 'The paused kuri registration has changed.'
+            ;;
+        *) fail 'Finish the current kuri startup operation before updating its registration.' ;;
+    esac
+    require_admin
+    /usr/bin/sudo -n -u "$account" -- /bin/cat "$binary" > "$staging/kuri"
+    [ -s "$staging/kuri" ] || fail 'The replacement kuri executable is empty.'
+    await_startup_handoff
+    plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
+    /bin/cp -p "$plist" "$plist_stage/original.plist"
+    if exists "$pause_file"; then /bin/cp -p "$pause_file" "$plist_stage/original.pause"; fi
+    if exists "$program"; then /bin/cp -p "$program" "$staging/original.program"; fi
+    printf '%s\n' "$template" > "$staging/sockets.plist"
+    configure_plist "$staging/sockets.plist" legacy "$registered_port"
+    /usr/bin/install -o root -g wheel -m 0644 "$staging/sockets.plist" "$plist_stage/sockets.plist"
+    /usr/bin/install -o root -g wheel -m 0755 "$staging/kuri" "$staging/new.program"
+    if [ -n "$loaded_job" ]; then
+        bootout_attempted=true
+        /bin/launchctl bootout "system/$label"
+    fi
+    program_changed=true
+    /bin/mv -fh "$staging/new.program" "$program"
+    link_removed=true
+    change_link remove
+    /bin/mv -fh "$plist_stage/sockets.plist" "$plist"
+    /bin/rm -f "$pause_file"
+    clear_activation
+    bootstrap_attempted=true
+    /bin/launchctl bootstrap system "$plist"
+}
+
 startup_command() {
     operation=$1
     binary=$2
@@ -297,10 +355,15 @@ startup_command() {
     lock_installation
     staging= plist_stage= record=
     plist_changed=false link_created=false disabled_changed=false bootout_attempted=false bootstrap_attempted=false
+    program_changed=false link_removed=false
     trap finish_startup EXIT
     trap 'exit 130' HUP INT TERM
     staging=$(/usr/bin/mktemp -d /private/var/tmp/kuri-install.XXXXXX)
     verify_registration
+    if [ "$operation" = --startup-convert-app ]; then
+        convert_app_startup
+        return
+    fi
     if [ "$operation" = --startup-install ]; then
         read_menu_pause
         case "$pause_stage" in
@@ -698,7 +761,8 @@ case "${1:-}" in
 esac
 
 if { [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && {
-    [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ] || [ "$1" = --startup-unregister-sockets ]
+    [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ] || [ "$1" = --startup-unregister-sockets ] ||
+        [ "$1" = --startup-convert-app ]
 }; then
     startup_command "$@"
     exit 0

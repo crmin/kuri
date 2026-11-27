@@ -74,6 +74,34 @@ func TestLauncherSkipsAutoStartButAllowsManualStart(t *testing.T) {
 	}
 }
 
+func TestLauncherStartsProxyOnlyWhenEnabled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, enabled := range []bool{true, false} {
+		if _, _, err := settings.NewStore(home).Update(t.Context(), func(cfg *settings.Config) error {
+			cfg.General.AutoStart = enabled
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		runner := &menuFixture{calls: make(chan []string, 4), resume: make(chan struct{}),
+			stateValue: menuview.State{Mode: "stopped"}}
+		close(runner.resume)
+		views := make(chan menuPresentation, 8)
+		controller := &menuController{runner: runner, render: func(view menuPresentation) { views <- view }}
+		controller.act(autoStartAction, true)
+		waitForMenu(t, views, func(view menuPresentation) bool { return !view.Busy && view.Known })
+		if calls := len(runner.calls); (enabled && calls != 1) || (!enabled && calls != 0) {
+			t.Fatalf("automatic startup enabled=%v: got %d calls", enabled, calls)
+		}
+		if enabled {
+			if args := <-runner.calls; len(args) != 1 || args[0] != "__auto_start" {
+				t.Fatalf("unexpected automatic start arguments %q", args)
+			}
+		}
+	}
+}
+
 func TestCommandRunnerReportsDeadline(t *testing.T) {
 	runner := testCommandRunner(t, t.TempDir(), "#!/bin/sh\nexec /bin/sleep 30\n")
 	result := runner.run(t.Context(), 100*time.Millisecond, time.Second, "start")

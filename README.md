@@ -28,7 +28,9 @@ Finder에서 앱이 시작되지 않으면 `~/Library/Logs/kuri/startup.log`에�
 
 메뉴에서 `Settings...`를 선택하거나 메뉴가 열려 있을 때 `Command+,`를 누릅니다.
 
-- **General**에서 macOS 시작 등록과 프록시 자동 시작을 설정합니다. 두 옵션을 모두 켜면 macOS 부팅 시 프록시가 시작됩니다. 자동 시작을 끄면 앱 실행이나 HTTP 요청으로도 프록시가 시작되지 않습니다. 메뉴 또는 `kuri start`로 수동 시작할 수 있습니다. 이전 버전이 등록되어 있으면 현재 버전으로 업데이트한 뒤 자동 시작을 끕니다.
+- **Open at Login** 옆의 **Open System Settings**를 누릅니다. macOS의 **Open at Login** 목록에서 `+`를 누르고 kuri를 선택한 뒤 **Add**를 누릅니다.
+- **Start the reverse proxy when kuri opens**를 켜면 로그인 시 자동으로 앱이 열릴 때도 프록시가 시작됩니다. 이 옵션을 끄면 앱만 열립니다. 필요할 때 메뉴의 **Start**나 `kuri start`로 프록시를 켤 수 있습니다.
+- 이전 앱의 부팅 등록이나 구버전 프록시가 있으면 General의 **Update Proxy Registration**을 누릅니다. macOS가 관리자 인증을 요청할 수 있습니다. CLI의 `kuri install`로 등록했다면 새 CLI 바이너리로 `kuri install`을 다시 실행합니다.
 - **Kubernetes**에서 kubeconfig 파일을 열고 라우팅할 컨텍스트를 선택합니다. 파일을 바꾸면 새 파일의 모든 컨텍스트가 켜집니다.
 - **Server**와 **Port Forwarding**에서 도메인, 포트, Keep-Alive와 포트 범위를 설정합니다. 저장한 값은 실행 중인 프록시에 바로 적용됩니다. 수신 포트를 변경하면 프록시가 자동으로 재시작합니다. 포트 변경에 실패하면 저장된 포트를 이전 값으로 되돌립니다. 입력값은 그대로 두고 `Save Server Settings` 위에 오류를 표시합니다.
 - **Logs**에서 접근 로그를 열 수 있습니다. **Reset**은 확인 후 기본값을 다시 저장합니다.
@@ -66,7 +68,7 @@ kuri start
 
 To run the server in the foreground and view logs, run `kuri`. If kuri needs to register its LaunchDaemon on the first run, it asks for administrator approval once, then starts the server as part of the same command. If a LaunchDaemon is already registered for your account, kuri reuses it.
 
-launchd can reserve the configured port on both loopback addresses so kuri can run with standard user privileges. When automatic startup is enabled, an incoming HTTP request can start a registered proxy before the first intentional stop in this boot.
+launchd can reserve the configured port on both loopback addresses so kuri can run with standard user privileges. A socket-only registration starts the proxy when the app or CLI requests it. The port stays reserved after `kuri stop`.
 
 ## Start at boot
 
@@ -81,7 +83,7 @@ CGO_ENABLED=1 go build -o kuri .
 
 To update kuri, run `./kuri install` again from the directory where you built the new binary. If the startup job is already registered, `install` only updates the link. The server uses the new binary the next time it starts. If you move the binary, run the install command again from its new location.
 
-After `kuri stop` or app `Quit`, automatic startup is paused for the current boot. A job unloaded by an earlier version may need administrator approval the first time you resume it.
+When automatic startup is enabled, a CLI boot registration can start the proxy at boot or on an HTTP connection. After `kuri stop` or app `Quit`, automatic startup is paused for the current boot. Start the proxy explicitly or reopen kuri with automatic startup enabled to resume it. A job unloaded by an earlier version may need administrator approval the first time you resume it.
 
 To remove the startup registration, run the following command.
 
