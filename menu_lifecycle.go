@@ -43,14 +43,18 @@ func startBackgroundWithOrigin(ctx context.Context, app *daemon.App, home string
 		return 0, err
 	}
 	if pause.Phase == "" {
-		return start(ctx)
+		pid, err := start(ctx)
+		if err != nil {
+			return pid, err
+		}
+		return pid, settings.NewStore(home).SetProxyPaused(ctx, false)
 	}
 	operation := rand.Text()
 	if pause.Phase == "resuming" && pause.Operation != "" {
 		// Continue the recorded transaction rather than claiming another job.
 		operation = pause.Operation
 	}
-	return runMenuResume(ctx, menuResumeSteps{
+	pid, err := runMenuResume(ctx, menuResumeSteps{
 		begin: func(ctx context.Context) error {
 			return launchd.ChangeMenuRegistration(ctx, "resume", home, operation, pause.Operation, os.Stderr)
 		},
@@ -62,6 +66,10 @@ func startBackgroundWithOrigin(ctx context.Context, app *daemon.App, home string
 			return launchd.ChangeMenuRegistration(ctx, "rollback", home, operation, "", os.Stderr)
 		},
 	})
+	if err != nil {
+		return pid, err
+	}
+	return pid, settings.NewStore(home).SetProxyPaused(ctx, false)
 }
 
 func startResumedServer(ctx context.Context, app *daemon.App, start func(context.Context) (int, error)) (int, error) {
@@ -106,7 +114,27 @@ func stopBackground(ctx context.Context, app *daemon.App, home string) (int, err
 		return 0, err
 	}
 	defer lock.Close()
+	if err := pauseBackground(ctx, app, home, false); err != nil {
+		return 0, err
+	}
 	return app.Stop(ctx)
+}
+
+func pauseBackground(ctx context.Context, app *daemon.App, home string, quit bool) error {
+	state, err := app.State(ctx)
+	if err != nil {
+		return err
+	}
+	if state.Mode == "foreground" {
+		if quit {
+			return errors.New("Stop the foreground kuri process in its terminal before quitting.")
+		}
+		return daemon.ErrNoBackground
+	}
+	if err := launchd.CheckProxyPauseSupport(ctx, home, state.PID, app.SupportsLiveProxyPause); err != nil {
+		return err
+	}
+	return settings.NewStore(home).SetProxyPaused(ctx, true)
 }
 
 func quitMenu(ctx context.Context, app *daemon.App, home string, args []string) error {
@@ -131,10 +159,10 @@ func quitMenu(ctx context.Context, app *daemon.App, home string, args []string) 
 		return err
 	}
 	defer lock.Close()
-	if err := app.QuitBackground(ctx, pid, started); err != nil {
+	if err := pauseBackground(ctx, app, home, true); err != nil {
 		return err
 	}
-	if err := launchd.ChangeMenuRegistration(ctx, "pause", home, rand.Text(), "", os.Stderr); err != nil {
+	if err := app.QuitBackground(ctx, pid, started); err != nil {
 		return err
 	}
 	state, err := app.State(ctx)

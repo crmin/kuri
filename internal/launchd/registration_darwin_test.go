@@ -3,6 +3,7 @@
 package launchd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -29,6 +30,43 @@ func TestStartupRegistrationStateForOldAndNewPlists(t *testing.T) {
 	}
 	if _, err := decodeRegistration([]byte(template), "different-user", "/Users/kuri-user"); err == nil {
 		t.Fatal("accepted another account's registration")
+	}
+}
+
+func TestStopRejectsIncompatibleLoadedRegistration(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("registration executable is never probed as root")
+	}
+	program := filepath.Join(t.TempDir(), "kuri")
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	reg := Registration{Program: program}
+	for _, state := range []string{"running", "not running"} {
+		loaded := "\tpath = " + registrationPath + "\n\tprogram = " + program + "\n\tstate = " + state + "\n"
+		if err := checkProxyPauseSupport(t.Context(), reg, loaded, 0, nil); err == nil || !strings.Contains(err.Error(), "./kuri install") {
+			t.Fatalf("%s old service: %v", state, err)
+		}
+	}
+	if err := checkProxyPauseSupport(t.Context(), reg, "", 0, nil); err != nil {
+		t.Fatalf("unloaded service: %v", err)
+	}
+	if err := os.WriteFile(program, []byte("#!/bin/sh\n[ \"$1\" = __proxy_pause_version ] && printf '1\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	loaded := "\tpath = " + registrationPath + "\n\tprogram = " + program + "\n"
+	if err := checkProxyPauseSupport(t.Context(), reg, loaded, 0, nil); err != nil {
+		t.Fatalf("compatible service: %v", err)
+	}
+	loaded += "\tpid = 123\n"
+	if err := checkProxyPauseSupport(t.Context(), reg, loaded, 0, func(context.Context) bool { return false }); err == nil {
+		t.Fatal("accepted old idle activation against the replacement executable")
+	}
+	if err := checkProxyPauseSupport(t.Context(), reg, loaded, 0, func(context.Context) bool { return true }); err != nil {
+		t.Fatalf("compatible idle activation: %v", err)
+	}
+	if err := checkProxyPauseSupport(t.Context(), reg, loaded, 123, nil); err != nil {
+		t.Fatalf("running proxy will be stopped and should not need a probe: %v", err)
 	}
 }
 

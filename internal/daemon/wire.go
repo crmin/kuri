@@ -69,6 +69,7 @@ type reply struct {
 	Error      string          `json:"error,omitempty"`
 	Menu       *menuview.State `json:"menu,omitempty"`
 	PortChange string          `json:"port_change,omitempty"`
+	ProxyPause bool            `json:"proxy_pause,omitempty"`
 }
 
 func writeReply(out io.Writer, value reply) error {

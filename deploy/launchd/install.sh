@@ -228,6 +228,14 @@ restore_startup() {
     if [ -n "$plist_stage" ] && [ -f "$plist_stage/original.pause" ]; then
         /bin/mv -fh "$plist_stage/original.pause" "$pause_file" || return 1
     fi
+    if "${program_changed:-false}"; then
+        if [ -f "$staging/original.program" ]; then
+            /bin/mv -fh "$staging/original.program" "$program" || return 1
+        else
+            /bin/rm -f "$program" || return 1
+        fi
+    fi
+    if "${link_removed:-false}"; then binary=$original_link; change_link replace || return 1; fi
     if "$link_created"; then change_link remove || return 1; fi
     if "$disabled_changed"; then /bin/launchctl disable "system/$label" || return 1; fi
     if "$bootout_attempted" && ! /bin/launchctl print "system/$label" >/dev/null 2>&1; then
@@ -239,9 +247,9 @@ finish_startup() {
     result=$?
     trap - EXIT
     if [ "$result" -ne 0 ] && ! restore_startup; then
-        printf 'Could not restore the previous kuri installation. Inspect %s and %s. Backup: %s\n' \
-            "$plist" "$link" "${plist_stage:-none}" >&2
-        plist_stage=
+        printf 'Could not restore the previous kuri installation. Inspect %s and %s. Backups: %s %s\n' \
+            "$plist" "$link" "${plist_stage:-none}" "${staging:-none}" >&2
+        plist_stage= staging=
     fi
     if [ -n "$plist_stage" ]; then /bin/rm -rf "$plist_stage"; fi
     if [ -n "$record" ]; then /bin/rm -f "$record"; fi
@@ -273,6 +281,93 @@ await_startup_handoff() {
     ' kuri-startup-handoff "$handoff_directory" || fail 'The kuri settings operation did not complete.'
 }
 
+stage_proxy_replacement() {
+    if exists "$program"; then
+        [ -f "$program" ] && protected_by_root "$program" || fail 'Unsafe kuri executable.'
+        /bin/cp -p "$program" "$staging/original.program"
+    fi
+    case "$binary" in /*) ;; *) fail 'Specify an absolute kuri executable path.' ;; esac
+    /usr/bin/sudo -n -u "$account" -- /bin/cat "$binary" > "$staging/kuri"
+    [ -s "$staging/kuri" ] || fail 'The replacement kuri executable is empty.'
+    /usr/bin/install -o root -g wheel -m 0755 "$staging/kuri" "$staging/new.program"
+}
+
+unload_proxy_for_update() {
+    read_loaded_job
+    [ -n "$loaded_job" ] || return 0
+    verify_loaded_job || fail 'The loaded kuri LaunchDaemon differs from its registered configuration.'
+    saved_pid=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^\tpid = //p')
+    saved_birth=
+    if [ -n "$saved_pid" ]; then
+        menu_process_birth "$saved_pid"
+        saved_birth=$process_birth
+        if [ -z "$saved_birth" ]; then saved_pid=; fi
+    fi
+    bootout_attempted=true
+    /bin/launchctl bootout "system/$label"
+    wait_menu_process
+}
+
+replace_proxy_binary() {
+    program_changed=true
+    /bin/mv -fh "$staging/new.program" "$program"
+}
+
+reload_proxy_job() {
+    clear_activation
+    bootstrap_attempted=true
+    /bin/launchctl bootstrap system "$plist"
+}
+
+refresh_managed_proxy() {
+    [ "$registered" = legacy ] || [ "$registered" = eager ] || fail 'This registration cannot be updated by the kuri app.'
+    [ -f "$program" ] && protected_by_root "$program" || fail 'Unsafe kuri executable.'
+    require_admin
+    stage_proxy_replacement
+    await_startup_handoff
+    unload_proxy_for_update
+    replace_proxy_binary
+    if "$bootout_attempted"; then reload_proxy_job; fi
+}
+
+convert_app_startup() {
+    [ "$registered" = startup ] && [ -L "$link" ] || fail 'No previous kuri app startup registration was found.'
+    original_link=$(/usr/bin/readlink "$link")
+    installed_dir="$home/.kuri/installed/"
+    case "$original_link" in "$installed_dir"*/kuri) ;; *) fail 'This registration belongs to the kuri CLI.' ;; esac
+    digest_dir=${original_link#"$installed_dir"}
+    digest_dir=${digest_dir%/kuri}
+    case "$digest_dir" in ''|*[!0-9a-f]*) fail 'Invalid kuri app executable path.' ;; esac
+    [ "${#digest_dir}" -eq 64 ] && trusted_path "$original_link" && trusted_path "$bin_directory" ||
+        fail 'Unsafe kuri app startup registration.'
+    read_menu_pause
+    case "$pause_stage" in
+        ''|completed) ;;
+        paused)
+            digest=$(/usr/bin/shasum -a 256 < "$plist" | /usr/bin/awk '{print $1}')
+            [ "$saved_uid" = "$uid" ] && [ "$saved_digest" = "$digest" ] && [ -z "$loaded_job" ] ||
+                fail 'The paused kuri registration has changed.'
+            ;;
+        *) fail 'Finish the current kuri startup operation before updating its registration.' ;;
+    esac
+    require_admin
+    stage_proxy_replacement
+    plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
+    /bin/cp -p "$plist" "$plist_stage/original.plist"
+    if exists "$pause_file"; then /bin/cp -p "$pause_file" "$plist_stage/original.pause"; fi
+    printf '%s\n' "$template" > "$staging/sockets.plist"
+    configure_plist "$staging/sockets.plist" legacy "$registered_port"
+    /usr/bin/install -o root -g wheel -m 0644 "$staging/sockets.plist" "$plist_stage/sockets.plist"
+    await_startup_handoff
+    unload_proxy_for_update
+    replace_proxy_binary
+    link_removed=true
+    change_link remove
+    /bin/mv -fh "$plist_stage/sockets.plist" "$plist"
+    /bin/rm -f "$pause_file"
+    reload_proxy_job
+}
+
 startup_command() {
     operation=$1
     binary=$2
@@ -297,10 +392,15 @@ startup_command() {
     lock_installation
     staging= plist_stage= record=
     plist_changed=false link_created=false disabled_changed=false bootout_attempted=false bootstrap_attempted=false
+    program_changed=false link_removed=false
     trap finish_startup EXIT
     trap 'exit 130' HUP INT TERM
     staging=$(/usr/bin/mktemp -d /private/var/tmp/kuri-install.XXXXXX)
     verify_registration
+    case "$operation" in
+        --startup-convert-app) convert_app_startup; return ;;
+        --startup-refresh-proxy) refresh_managed_proxy; return ;;
+    esac
     if [ "$operation" = --startup-install ]; then
         read_menu_pause
         case "$pause_stage" in
@@ -698,7 +798,8 @@ case "${1:-}" in
 esac
 
 if { [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && {
-    [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ] || [ "$1" = --startup-unregister-sockets ]
+    [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ] || [ "$1" = --startup-unregister-sockets ] ||
+        [ "$1" = --startup-convert-app ] || [ "$1" = --startup-refresh-proxy ]
 }; then
     startup_command "$@"
     exit 0

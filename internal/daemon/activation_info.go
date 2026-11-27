@@ -49,6 +49,11 @@ func (app *App) activationInfo(ctx context.Context) (reply, error) {
 	return decodeControlReply(json.NewDecoder(socket))
 }
 
+func (app *App) SupportsLiveProxyPause(ctx context.Context) bool {
+	info, err := app.activationInfo(ctx)
+	return err == nil && info.ProxyPause
+}
+
 func ProbePort(port int) error {
 	listeners, err := bindHTTP(port)
 	if err != nil {
@@ -82,10 +87,6 @@ func (app *App) RegisterForPort(ctx context.Context, operation string) error {
 
 func (app *App) EnsurePolicySupport(ctx context.Context) error {
 	return launchd.EnsurePolicySupport(ctx, app.home, app.stderr)
-}
-
-func (app *App) UninstallStartupForReset(ctx context.Context, save func(context.Context) error) error {
-	return launchd.UninstallSettingsStartup(ctx, app.home, app.stderr, save)
 }
 
 // OwnsRegisteredPort confirms the live listener independently of the plist.

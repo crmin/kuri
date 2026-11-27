@@ -9,6 +9,55 @@ import (
 	"time"
 )
 
+func TestProxyPauseExpiresAtNextBoot(t *testing.T) {
+	store := NewStore(t.TempDir())
+	ctx := t.Context()
+	if err := store.setProxyPaused(ctx, "boot-one", true); err != nil {
+		t.Fatal(err)
+	}
+	if paused, err := store.proxyPaused("boot-one"); err != nil || !paused {
+		t.Fatalf("current boot: paused=%v, err=%v", paused, err)
+	}
+	if paused, err := store.proxyPaused("boot-two"); err != nil || paused {
+		t.Fatalf("next boot: paused=%v, err=%v", paused, err)
+	}
+	if enabled, err := store.AutoStart(ctx); err != nil || !enabled {
+		t.Fatalf("saved preference: enabled=%v, err=%v", enabled, err)
+	}
+	if err := store.setProxyPaused(ctx, "boot-one", false); err != nil {
+		t.Fatal(err)
+	}
+	if paused, err := store.proxyPaused("boot-one"); err != nil || paused {
+		t.Fatalf("after resume: paused=%v, err=%v", paused, err)
+	}
+}
+
+func TestPausedPassiveStartSkipsSettingsRead(t *testing.T) {
+	boot, err := bootSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boot == "" {
+		t.Skip("requires a boot session")
+	}
+	store := NewStore(t.TempDir())
+	if err := store.SetProxyPaused(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.Path(), []byte("general: ["), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := store.PassiveStartAllowed(t.Context()); allowed || err != nil {
+		t.Fatalf("paused registration read settings: allowed=%v, err=%v", allowed, err)
+	}
+	if err := store.SetProxyPaused(t.Context(), false); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := store.PassiveStartAllowed(t.Context()); allowed || err == nil {
+		t.Fatalf("resumed registration did not read settings: allowed=%v, err=%v", allowed, err)
+	}
+}
+
 func TestSettingsCreatesDefaultsOnFirstLaunch(t *testing.T) {
 	home := t.TempDir()
 	store := NewStore(home)

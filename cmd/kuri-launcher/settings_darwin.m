@@ -1,6 +1,7 @@
 //go:build cgo
 
 #import "settings_darwin.h"
+#import <ServiceManagement/ServiceManagement.h>
 
 extern void kuriGoSettingsRequest(char *edit);
 extern void kuriGoAction(int action);
@@ -81,7 +82,7 @@ static NSString *settingsString(id value) {
 @property(nonatomic, retain) NSTextField *serverError;
 @property(nonatomic, retain) NSTextField *contextError;
 @property(nonatomic, retain) NSTextField *forwardError;
-@property(nonatomic, retain) NSButton *registration;
+@property(nonatomic, retain) NSButton *prepareProxy;
 @property(nonatomic, retain) NSButton *autoStart;
 @property(nonatomic, retain) NSButton *keepAlive;
 @property(nonatomic, retain) NSButton *retry;
@@ -95,7 +96,6 @@ static NSString *settingsString(id value) {
 @property(nonatomic) BOOL busy;
 @property(nonatomic) BOOL loaded;
 @property(nonatomic) BOOL corrupt;
-@property(nonatomic) BOOL registrationAvailable;
 @property(nonatomic) BOOL closeAfterSave;
 @property(nonatomic) BOOL quitAfterSave;
 @property(nonatomic) BOOL confirmingClose;
@@ -155,6 +155,23 @@ static NSString *settingsString(id value) {
     addFullWidth(section, settingsLabel(text, NSColor.secondaryLabelColor));
 }
 
+- (void)addLoginItemToSection:(NSStackView *)section {
+    NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 10);
+    row.alignment = NSLayoutAttributeCenterY;
+    [row addArrangedSubview:settingsItemLabel(@"Open at Login")];
+    [row addArrangedSubview:[NSButton buttonWithTitle:@"Open System Settings" target:self action:@selector(openLoginItemsSettings:)]];
+    [section addArrangedSubview:row];
+    [self addDescription:@"Under Open at Login, click +, select kuri, and click Add." to:section];
+}
+
+- (void)openLoginItemsSettings:(id)sender {
+    [SMAppService openSystemSettingsLoginItems];
+}
+
+- (void)updateProxyRegistration:(id)sender {
+    [self submit:@{@"prepare_proxy": @YES}];
+}
+
 - (NSButton *)button:(NSString *)title action:(SEL)action {
     NSButton *button = [NSButton buttonWithTitle:title target:self action:action];
     [self.controls addObject:button];
@@ -207,10 +224,11 @@ static NSString *settingsString(id value) {
     NSStackView *sections = settingsStack(NSUserInterfaceLayoutOrientationVertical, 24);
     addFullWidth(body, sections);
     NSStackView *section = [self addSection:@"General" to:sections];
-    self.registration = [self checkbox:@"Register kuri at system startup" identifier:@"register" inSection:section];
-    self.autoStart = [self checkbox:@"Start the reverse proxy automatically" identifier:@"auto_start" inSection:section];
-    [self addDescription:@"Starts the proxy when you open kuri, at system startup if registered, or when a connection reaches a registered proxy. Turn this off to start the proxy manually."
-                      to:section];
+    [self addLoginItemToSection:section];
+    self.autoStart = [self checkbox:@"Start the reverse proxy when kuri opens" identifier:@"auto_start" inSection:section];
+    self.prepareProxy = [self button:@"Update Proxy Registration" action:@selector(updateProxyRegistration:)];
+    self.prepareProxy.hidden = YES;
+    [section addArrangedSubview:self.prepareProxy];
 
     section = [self addSection:@"Kubernetes" to:sections];
     NSStackView *pathRow = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
@@ -305,7 +323,6 @@ static NSString *settingsString(id value) {
         BOOL reset = [control isKindOfClass:[NSButton class]] && control.action == @selector(reset:);
         control.enabled = !self.busy && self.loaded && (!self.corrupt || reset);
     }
-    self.registration.enabled = self.registration.enabled && self.registrationAvailable;
     self.fields[@"minutes"].enabled = self.fields[@"minutes"].enabled && self.keepAlive.state == NSControlStateValueOn;
     self.trigger.enabled = self.trigger.enabled && self.keepAlive.state == NSControlStateValueOn;
     for (NSStackView *row in self.contexts.arrangedSubviews) {
@@ -351,10 +368,9 @@ static NSString *settingsString(id value) {
     if ([cfg isKindOfClass:NSDictionary.class]) {
         self.loaded = YES;
         self.corrupt = [response[@"file_error"] length] != 0;
-        self.registrationAvailable = [response[@"registration_error"] length] == 0;
+        self.prepareProxy.hidden = ![response[@"proxy_update_needed"] boolValue];
         NSDictionary *general = cfg[@"general"], *kube = cfg[@"kubernetes"];
         NSDictionary *server = cfg[@"server"], *forward = cfg[@"port_forward"];
-        self.registration.state = [general[@"launch_at_login"] boolValue];
         self.autoStart.state = [general[@"auto_start_proxy"] boolValue];
         self.keepAlive.state = [forward[@"keep_alive_enabled"] boolValue];
         [self.trigger selectItemAtIndex:[forward[@"keep_alive_trigger"] isEqual:@"forward_opened"] ? 1 : 0];

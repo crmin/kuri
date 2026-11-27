@@ -21,15 +21,7 @@ func InstallStartupAt(context.Context, string, io.Writer, io.Writer) error {
 	return startupUnavailable()
 }
 
-func InstallSettingsStartup(context.Context, string, string, io.Writer, io.Writer, func(context.Context) error) error {
-	return startupUnavailable()
-}
-
 func UninstallStartup(context.Context, io.Writer, io.Writer) error { return startupUnavailable() }
-
-func UninstallSettingsStartup(context.Context, string, io.Writer, func(context.Context) error) error {
-	return startupUnavailable()
-}
 
 func RemoveSocketRegistration(context.Context, io.Writer) error { return startupUnavailable() }
 
@@ -37,7 +29,17 @@ func Registered(context.Context, string) (Registration, error) { return Registra
 
 func (r Registration) SupportsSettings(context.Context) bool { return !r.Present() }
 
+func (r Registration) SupportsProxyPause(context.Context) bool { return !r.Present() }
+
+func CheckProxyPauseSupport(context.Context, string, int, func(context.Context) bool) error {
+	return nil
+}
+
 func EnsurePolicySupport(context.Context, string, io.Writer) error { return nil }
+
+func UpdateProxyRegistration(context.Context, string, string, Registration, io.Writer, func(context.Context) error) error {
+	return startupUnavailable()
+}
 
 func ReadPortChange() (PortChange, error) { return PortChange{}, nil }
 

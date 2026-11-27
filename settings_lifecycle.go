@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/crmin/kuri/internal/daemon"
@@ -18,10 +19,10 @@ type settingsServer interface {
 	ApplySettings(context.Context, daemon.State, string, bool) (daemon.State, error)
 	Start(context.Context) (int, error)
 	Stop(context.Context) (int, error)
+	HoldProxyForRegistration(context.Context, func(daemon.State) error) (io.Closer, bool, error)
 	ConfirmPortChange(context.Context, launchd.PortChange) error
 	Registration(context.Context) (launchd.Registration, error)
 	OwnsRegisteredPort(context.Context, int) (bool, error)
-	UninstallStartupForReset(context.Context, func(context.Context) error) error
 	PreparePortRestart(context.Context, daemon.State, string) error
 	RegisterForPort(context.Context, string) error
 	HandoffDirectForeground(context.Context, daemon.State, string) error
@@ -40,6 +41,17 @@ func updateSettings(ctx context.Context, app settingsServer, home string, edit s
 		return settingsResult{err: err}
 	}
 	defer lock.Close()
+
+	if edit.Register != nil {
+		return settingsResult{err: errors.New("Open Login Items in macOS System Settings to change whether kuri opens at login.")}
+	}
+	if edit.PrepareProxy {
+		if edit != (settings.Edit{PrepareProxy: true}) {
+			return settingsResult{err: errors.New("Update the proxy registration separately from other settings.")}
+		}
+		err := prepareProxyRegistration(ctx, app, home)
+		return settingsResult{applied: err == nil, err: err}
+	}
 
 	store := settings.NewStore(home)
 	before, readErr := store.Read()
@@ -69,69 +81,35 @@ func updateSettings(ctx context.Context, app settingsServer, home string, edit s
 			return settingsResult{err: err}
 		}
 	}
-	if edit.Register != nil && !edit.Reset {
-		if err := changeStartupSetting(ctx, app, home, state, desired.General.LaunchAtLogin); err != nil {
-			return settingsResult{err: err}
-		}
-		state, err = app.State(ctx)
-		if err != nil {
-			return settingsResult{err: err}
-		}
-	}
 
 	previousPort := before.Server.Port
 	if state.Port != 0 {
 		previousPort = state.Port
 	}
-	wasRunning := state.PID != 0
 	var saved settings.Config
-	var committed bool
-	save := func(ctx context.Context) error {
-		var err error
-		if edit.Reset && readErr != nil {
-			_, saved, err = store.Reset(ctx)
-		} else {
-			_, saved, err = store.Update(ctx, func(current *settings.Config) error {
-				if current.Fingerprint() != before.Fingerprint() {
-					return daemon.ErrSettingsChanged
-				}
-				*current = desired
-				return nil
-			})
-		}
-		committed = err == nil
-		return err
-	}
-	resetRegistration := false
-	if edit.Reset {
-		reg, err := app.Registration(ctx)
-		if err != nil {
-			return settingsResult{err: err}
-		}
-		if reg.AtBoot {
-			if state.Mode == "foreground" && state.Activated {
-				return settingsResult{err: errors.New("Stop the foreground proxy from its terminal before changing the startup registration.")}
+	if edit.Reset && readErr != nil {
+		_, saved, err = store.Reset(ctx)
+	} else {
+		_, saved, err = store.Update(ctx, func(current *settings.Config) error {
+			if current.Fingerprint() != before.Fingerprint() {
+				return daemon.ErrSettingsChanged
 			}
-			if err := app.UninstallStartupForReset(ctx, save); err != nil {
-				return settingsResult{saved: committed, err: err}
-			}
-			resetRegistration = true
-		}
+			*current = desired
+			return nil
+		})
 	}
-	if !committed {
-		if err := save(ctx); err != nil {
-			return settingsResult{err: err}
-		}
+	if err != nil {
+		return settingsResult{err: err}
 	}
 	explicitPort := edit.Port != nil || edit.Reset || edit == (settings.Edit{})
-	generalOnly := !explicitPort && (edit.AutoStart != nil || edit.Register != nil) &&
+	generalOnly := !explicitPort && edit.AutoStart != nil &&
 		before.ProxyFingerprint() == saved.ProxyFingerprint()
 	if generalOnly {
 		return settingsResult{saved: true, applied: true}
 	}
 	// A proxy can publish its control socket between the first state check
 	// and the settings write. Observe again before treating it as stopped.
-	if state.PID == 0 || resetRegistration {
+	if state.PID == 0 {
 		state, err = app.State(ctx)
 		if err != nil {
 			return settingsResult{saved: true, err: err}
@@ -147,15 +125,8 @@ func updateSettings(ctx context.Context, app settingsServer, home string, edit s
 			portChanged = reg.Present() && reg.Port != saved.Server.Port
 		}
 		if portChanged {
-			result := switchSavedPort(ctx, app, home, state, saved, previousPort)
-			if !resetRegistration || !wasRunning || state.PID != 0 {
-				return result
-			}
-			return resumeResetProxy(ctx, app, store, result)
+			return switchSavedPort(ctx, app, home, state, saved, previousPort)
 		}
-	}
-	if resetRegistration && wasRunning && state.PID == 0 {
-		return resumeResetProxy(ctx, app, store, settingsResult{saved: true, applied: true})
 	}
 	if state.PID != 0 && state.ProxyFingerprint == "" && state.Mode == "background" {
 		err = upgradeRunningProxy(ctx, app, saved)
@@ -168,21 +139,6 @@ func updateSettings(ctx context.Context, app settingsServer, home string, edit s
 		return settingsResult{saved: true, err: err}
 	}
 	return settingsResult{saved: true, applied: true}
-}
-
-func resumeResetProxy(ctx context.Context, app settingsServer, store settings.Store, result settingsResult) settingsResult {
-	cfg, err := store.Read()
-	if err == nil {
-		_, err = app.Start(ctx)
-		if err == nil || errors.Is(err, daemon.ErrAlreadyRunning) {
-			err = confirmServingSettings(ctx, app, cfg)
-		}
-	}
-	if err != nil {
-		result.err = errors.Join(result.err, err)
-		result.applied = false
-	}
-	return result
 }
 
 func upgradeRunningProxy(ctx context.Context, app settingsServer, cfg settings.Config) error {

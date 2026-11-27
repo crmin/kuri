@@ -4,6 +4,7 @@ package launchd
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +22,6 @@ import (
 
 const (
 	registrationPath = "/Library/LaunchDaemons/com.github.crmin.kuri.plist"
-	managedProgram   = Directory + "/kuri"
 	startupLink      = "/usr/local/bin/kuri"
 )
 
@@ -44,7 +45,20 @@ func Registered(ctx context.Context, home string) (Registration, error) {
 	if err != nil {
 		return Registration{}, fmt.Errorf("read kuri LaunchDaemon registration: %w", err)
 	}
-	return decodeRegistration(raw, account, home)
+	registration, err := decodeRegistration(raw, account, home)
+	if err == nil && registration.Program == startupLink {
+		target, linkErr := os.Readlink(startupLink)
+		registration.AppStartup = linkErr == nil && appStartupTarget(home, target)
+	}
+	return registration, err
+}
+
+func appStartupTarget(home, target string) bool {
+	dir := filepath.Dir(target)
+	hash := filepath.Base(dir)
+	_, err := hex.DecodeString(hash)
+	return err == nil && len(hash) == 64 && strings.ToLower(hash) == hash &&
+		target == filepath.Join(home, ".kuri", "installed", hash, "kuri")
 }
 
 func decodeRegistration(raw []byte, account, home string) (Registration, error) {
@@ -90,6 +104,10 @@ func decodeRegistration(raw []byte, account, home string) (Registration, error) 
 }
 
 func (r Registration) SupportsSettings(ctx context.Context) bool {
+	return r.supports(ctx, "__settings_version")
+}
+
+func (r Registration) supports(ctx context.Context, command string) bool {
 	if !r.Present() {
 		return true
 	}
@@ -98,8 +116,70 @@ func (r Registration) SupportsSettings(ctx context.Context) bool {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	answer, err := exec.CommandContext(ctx, r.Program, "__settings_version").Output()
+	answer, err := exec.CommandContext(ctx, r.Program, command).Output()
 	return err == nil && strings.TrimSpace(string(answer)) == "1"
+}
+
+func (r Registration) SupportsProxyPause(ctx context.Context) bool {
+	return r.supports(ctx, "__proxy_pause_version")
+}
+
+func CheckProxyPauseSupport(ctx context.Context, home string, running int, probe func(context.Context) bool) error {
+	reg, err := Registered(ctx, home)
+	if errors.Is(err, ErrOtherRegistration) {
+		return nil
+	}
+	if err != nil || !reg.Present() {
+		return err
+	}
+	loaded, err := loadedRegistration(ctx)
+	if err != nil {
+		return err
+	}
+	return checkProxyPauseSupport(ctx, reg, loaded, running, probe)
+}
+
+func checkProxyPauseSupport(ctx context.Context, reg Registration, loaded string, running int, probe func(context.Context) bool) error {
+	if loaded == "" {
+		return nil
+	}
+	var path, program string
+	var pid int
+	for line := range strings.SplitSeq(loaded, "\n") {
+		if value, ok := strings.CutPrefix(line, "\tpath = "); ok {
+			path = value
+		}
+		if value, ok := strings.CutPrefix(line, "\tprogram = "); ok {
+			program = value
+		}
+		if value, ok := strings.CutPrefix(line, "\tpid = "); ok {
+			pid, _ = strconv.Atoi(value)
+		}
+	}
+	if path != registrationPath || program != reg.Program {
+		return errors.New("The loaded kuri LaunchDaemon differs from its registered configuration.")
+	}
+	// A runtime already visible to Stop will exit before Stop succeeds. An
+	// idle activation process can outlive its replaced executable on disk.
+	if !reg.SupportsProxyPause(ctx) {
+		return reg.ProxyUpdateError()
+	}
+	if pid > 0 && pid != running && (probe == nil || !probe(ctx)) {
+		return errors.New("The previous kuri activation process is still active. Wait a moment and try again.")
+	}
+	return nil
+}
+
+func loadedRegistration(ctx context.Context) (string, error) {
+	output, err := exec.CommandContext(ctx, "/bin/launchctl", "print", serviceTarget).Output()
+	if err == nil {
+		return string(output), nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 113 {
+		return "", nil
+	}
+	return "", fmt.Errorf("check the kuri LaunchDaemon: %w", err)
 }
 
 func EnsurePolicySupport(ctx context.Context, home string, stderr io.Writer) error {

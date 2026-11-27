@@ -14,6 +14,7 @@ type settingsView struct {
 	Contexts          []string        `json:"contexts"`
 	FileError         string          `json:"file_error,omitempty"`
 	KubeconfigError   string          `json:"kubeconfig_error,omitempty"`
+	ProxyUpdateNeeded bool            `json:"proxy_update_needed,omitempty"`
 	RegistrationError string          `json:"registration_error,omitempty"`
 	RuntimeWarning    string          `json:"runtime_warning,omitempty"`
 	ApplyPending      bool            `json:"apply_pending,omitempty"`
@@ -34,8 +35,12 @@ func loadSettingsView(ctx context.Context, home string, app settingsServer) sett
 	registration, err := launchd.Registered(ctx, home)
 	if err != nil {
 		view.RegistrationError = err.Error()
-	} else {
-		view.Config.General.LaunchAtLogin = registration.AtBoot
+	} else if registration.AppStartup || !registration.SupportsProxyPause(ctx) {
+		if registration.CanUpdateFromApp() {
+			view.ProxyUpdateNeeded = true
+		} else {
+			view.RegistrationError = registration.ProxyUpdateError().Error()
+		}
 	}
 	kube, _, err := forward.LoadKubernetes(view.Config.Kubernetes.ConfigPath)
 	if err != nil {

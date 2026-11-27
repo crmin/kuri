@@ -11,18 +11,13 @@ import (
 	"time"
 )
 
-func InstallSettingsStartup(ctx context.Context, home, source string, stdout, stderr io.Writer, handoff func(context.Context) error) error {
-	if handoff == nil {
-		return changeStartup(ctx, "install", source, stdout, stderr, "--keep-paused")
+func UpdateProxyRegistration(ctx context.Context, home, source string, reg Registration, stderr io.Writer, handoff func(context.Context) error) error {
+	operation := "refresh-proxy"
+	if reg.AppStartup {
+		operation = "convert-app"
 	}
 	return runStartupHandoff(ctx, home, handoff, func(ctx context.Context, dir string) error {
-		return changeStartup(ctx, "install", source, stdout, stderr, "--keep-paused", dir)
-	})
-}
-
-func UninstallSettingsStartup(ctx context.Context, home string, stderr io.Writer, save func(context.Context) error) error {
-	return runStartupHandoff(ctx, home, save, func(ctx context.Context, dir string) error {
-		return changeStartup(ctx, "uninstall", "", io.Discard, stderr, "80", "", dir)
+		return changeStartup(ctx, operation, source, io.Discard, stderr, "80", "", dir)
 	})
 }
 

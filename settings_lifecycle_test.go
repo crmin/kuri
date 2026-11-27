@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/crmin/kuri/internal/daemon"
@@ -21,7 +22,6 @@ type testSettingsServer struct {
 	policyErr    error
 	registration launchd.Registration
 	ownedPort    int
-	uninstall    func(context.Context, func(context.Context) error) error
 	start        func(context.Context) (int, error)
 	states       []daemon.State
 }
@@ -60,6 +60,9 @@ func (s *testSettingsServer) Start(ctx context.Context) (int, error) {
 func (*testSettingsServer) Stop(context.Context) (int, error) {
 	return 0, errors.New("unexpected Stop")
 }
+func (*testSettingsServer) HoldProxyForRegistration(context.Context, func(daemon.State) error) (io.Closer, bool, error) {
+	return nil, false, errors.New("unexpected registration handoff")
+}
 func (*testSettingsServer) ConfirmPortChange(context.Context, launchd.PortChange) error {
 	return errors.New("unexpected launchd port change")
 }
@@ -68,12 +71,6 @@ func (s *testSettingsServer) Registration(context.Context) (launchd.Registration
 }
 func (s *testSettingsServer) OwnsRegisteredPort(_ context.Context, port int) (bool, error) {
 	return s.ownedPort == port, nil
-}
-func (s *testSettingsServer) UninstallStartupForReset(ctx context.Context, save func(context.Context) error) error {
-	if s.uninstall == nil {
-		return errors.New("unexpected startup uninstall")
-	}
-	return s.uninstall(ctx, save)
 }
 func (*testSettingsServer) PreparePortRestart(context.Context, daemon.State, string) error {
 	return errors.New("unexpected foreground port change")
@@ -85,6 +82,33 @@ func (*testSettingsServer) HandoffDirectForeground(context.Context, daemon.State
 	return errors.New("unexpected direct foreground handoff")
 }
 func (s *testSettingsServer) EnsurePolicySupport(context.Context) error { return s.policyErr }
+
+func TestProxyRegistrationUpdateRefusesPendingPort(t *testing.T) {
+	home := t.TempDir()
+	store := settings.NewStore(home)
+	if _, _, err := store.Update(t.Context(), func(cfg *settings.Config) error {
+		cfg.Server.Port = 8081
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &testSettingsServer{store: store,
+		registration: launchd.Registration{Program: "/usr/local/bin/kuri", Port: 8080, AtBoot: true, AppStartup: true},
+		state:        daemon.State{PID: 123, Mode: "background", Port: 8080}}
+	result := updateSettings(t.Context(), app, home, settings.Edit{PrepareProxy: true})
+	if result.applied || result.err == nil || !strings.Contains(result.err.Error(), "Apply the port setting") || app.state.PID != 123 {
+		t.Fatalf("port mismatch: %+v, state %+v", result, app.state)
+	}
+}
+
+func TestIndependentCLIUpdateUsesCLIInstruction(t *testing.T) {
+	home := t.TempDir()
+	app := &testSettingsServer{registration: launchd.Registration{Program: "/usr/local/bin/kuri", Port: 80, AtBoot: true}}
+	result := updateSettings(t.Context(), app, home, settings.Edit{PrepareProxy: true})
+	if app.registration.CanUpdateFromApp() || result.applied || result.err == nil || !strings.Contains(result.err.Error(), "./kuri install") {
+		t.Fatalf("independent CLI update: %+v", result)
+	}
+}
 
 func TestFailedPortChangeRestoresSavedPortAndKeepsOtherFields(t *testing.T) {
 	home := t.TempDir()
@@ -189,103 +213,56 @@ func TestLauncherReportsSettingsPendingForOldDaemon(t *testing.T) {
 	}
 }
 
-func TestLaunchAtStartupUsesBundledBinary(t *testing.T) {
+func TestResetPreservesLoginItemAndCLIStartup(t *testing.T) {
 	home := t.TempDir()
-	applications := filepath.Join(t.TempDir(), "Applications")
-	bundle := filepath.Join(applications, "kuri.app", "Contents", "MacOS")
-	if err := os.MkdirAll(bundle, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(applications, 0775); err != nil {
-		t.Fatal(err)
-	}
-	binary := filepath.Join(bundle, "kuri")
-	const content = "the packaged kuri CLI"
-	if err := os.WriteFile(binary, []byte(content), 0755); err != nil {
-		t.Fatal(err)
-	}
-	staged, err := stageStartupBinary(home, binary)
+	store := settings.NewStore(home)
+	_, before, err := store.Update(t.Context(), func(cfg *settings.Config) error {
+		cfg.General.LaunchAtLogin = true // Legacy YAML from the prior app.
+		cfg.General.AutoStart = false
+		cfg.Server.Domain = "saved.example.com"
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Dir(filepath.Dir(staged)) != filepath.Join(home, ".kuri", "installed") {
-		t.Fatalf("binary staged outside the user's installer directory: %s", staged)
-	}
-	got, err := os.ReadFile(staged)
-	if err != nil || string(got) != content {
-		t.Fatalf("staged binary %q, %v", got, err)
-	}
-	info, err := os.Stat(staged)
-	if err != nil || info.Mode().Perm() != 0700 {
-		t.Fatalf("staged executable permissions: %v, %v", info, err)
+	registration := launchd.Registration{Program: "/fixture/kuri", Port: 80, AtBoot: true}
+	app := &testSettingsServer{store: store, registration: registration,
+		state: daemon.State{PID: 123, Mode: "background", Port: 80, Activated: true, ProxyFingerprint: before.ProxyFingerprint()}}
+	result := updateSettings(t.Context(), app, home, settings.Edit{Reset: true})
+	after, err := store.Read()
+	if !result.applied || err != nil || after.Fingerprint() != settings.Defaults(home).Fingerprint() ||
+		app.registration != registration || app.state.PID != 123 {
+		t.Fatalf("reset %+v, config %+v (%v), registration %+v, state %+v", result, after, err, app.registration, app.state)
 	}
 }
 
-func TestResetSavesBeforeRemovingRegistration(t *testing.T) {
+func TestLegacyRegistrationEditIsRejected(t *testing.T) {
 	home := t.TempDir()
 	store := settings.NewStore(home)
-	if _, err := store.Ensure(t.Context()); err != nil {
-		t.Fatal(err)
+	app := &testSettingsServer{store: store}
+	result := updateSettings(t.Context(), app, home, settings.Edit{Register: new(true)})
+	if result.saved || result.applied || result.err == nil {
+		t.Fatalf("legacy registration edit: %+v", result)
 	}
-	if err := os.WriteFile(store.Path(), []byte("server: ["), 0600); err != nil {
-		t.Fatal(err)
-	}
-	app := &testSettingsServer{store: store,
-		registration: launchd.Registration{Program: "/fixture/kuri", Port: 80, AtBoot: true},
-		state:        daemon.State{PID: 123, Mode: "background", Port: 80, Activated: true}}
-	starts := 0
-	app.uninstall = func(ctx context.Context, save func(context.Context) error) error {
-		if err := save(ctx); err != nil {
-			return err
-		}
-		cfg, err := store.Read()
-		if err != nil || cfg.Fingerprint() != settings.Defaults(home).Fingerprint() {
-			t.Fatalf("defaults at uninstall: %+v, %v", cfg, err)
-		}
-		app.registration = launchd.Registration{}
-		app.state = daemon.State{}
-		return nil
-	}
-	app.start = func(context.Context) (int, error) {
-		starts++
-		cfg, err := store.Read()
-		if err != nil {
-			return 0, err
-		}
-		app.state = daemon.State{PID: 456, Mode: "background", Port: cfg.Server.Port, ProxyFingerprint: cfg.ProxyFingerprint()}
-		return app.state.PID, nil
-	}
-	result := updateSettings(t.Context(), app, home, settings.Edit{Reset: true})
-	if !result.applied || starts != 1 || app.registration.Present() || app.state.Port != 80 {
-		t.Fatalf("reset %+v, starts %d, registration %+v, state %+v", result, starts, app.registration, app.state)
+	if _, err := os.Stat(store.Path()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy registration edit unexpectedly wrote settings: %v", err)
 	}
 }
 
-func TestResetSaveFailurePreservesRegistrationAndProxy(t *testing.T) {
+func TestDisableAutoStartKeepsRunningProxy(t *testing.T) {
 	home := t.TempDir()
 	store := settings.NewStore(home)
-	if _, err := store.Ensure(t.Context()); err != nil {
+	cfg, err := store.Ensure(t.Context())
+	if err != nil {
 		t.Fatal(err)
 	}
-	app := &testSettingsServer{store: store,
-		registration: launchd.Registration{Program: "/fixture/kuri", Port: 80, AtBoot: true},
-		state:        daemon.State{PID: 123, Mode: "background", Port: 80, Activated: true}}
-	app.uninstall = func(ctx context.Context, save func(context.Context) error) error {
-		if _, _, err := store.Update(ctx, func(c *settings.Config) error {
-			c.Server.Domain = "newer.example.com"
-			return nil
-		}); err != nil {
-			return err
-		}
-		if err := save(ctx); err != nil {
-			return err
-		}
-		t.Fatal("registration changed despite losing the settings comparison")
-		return nil
-	}
-	result := updateSettings(t.Context(), app, home, settings.Edit{Reset: true})
-	if result.saved || !errors.Is(result.err, daemon.ErrSettingsChanged) || !app.registration.Present() || app.state.PID != 123 {
-		t.Fatalf("failed reset %+v, registration %+v, state %+v", result, app.registration, app.state)
+	app := &testSettingsServer{store: store, state: daemon.State{
+		PID: 123, Mode: "background", Port: 80, ProxyFingerprint: cfg.ProxyFingerprint(),
+	}}
+	result := updateSettings(t.Context(), app, home, settings.Edit{AutoStart: new(false)})
+	after, err := store.Read()
+	if !result.applied || err != nil || after.General.AutoStart || app.state.PID != 123 {
+		t.Fatalf("auto-start change %+v, config %+v (%v), state %+v", result, after, err, app.state)
 	}
 }
 
