@@ -7,22 +7,29 @@ import (
 )
 
 type Edit struct {
-	AutoStart    *bool        `json:"auto_start,omitempty"`
-	PrepareProxy bool         `json:"prepare_proxy,omitempty"`
-	Register     *bool        `json:"register,omitempty"`
-	ConfigPath   *string      `json:"config_path,omitempty"`
-	Context      *ContextEdit `json:"context,omitempty"`
-	Style        *StyleEdit   `json:"style,omitempty"`
-	KeepAlive    *bool        `json:"keep_alive,omitempty"`
-	AutoHealing  *bool        `json:"auto_healing,omitempty"`
-	CheckSeconds *string      `json:"check_seconds,omitempty"`
-	Trigger      *string      `json:"trigger,omitempty"`
-	Domain       *string      `json:"domain,omitempty"`
-	Port         *string      `json:"port,omitempty"`
-	Minutes      *string      `json:"minutes,omitempty"`
-	MinPort      *string      `json:"min_port,omitempty"`
-	MaxPort      *string      `json:"max_port,omitempty"`
-	Reset        bool         `json:"reset,omitempty"`
+	AutoStart      *bool             `json:"auto_start,omitempty"`
+	PrepareProxy   bool              `json:"prepare_proxy,omitempty"`
+	Register       *bool             `json:"register,omitempty"`
+	ConfigPath     *string           `json:"config_path,omitempty"`
+	Context        *ContextEdit      `json:"context,omitempty"`
+	ContextAliases *ContextAliasEdit `json:"context_aliases,omitempty"`
+	Style          *StyleEdit        `json:"style,omitempty"`
+	KeepAlive      *bool             `json:"keep_alive,omitempty"`
+	AutoHealing    *bool             `json:"auto_healing,omitempty"`
+	CheckSeconds   *string           `json:"check_seconds,omitempty"`
+	Trigger        *string           `json:"trigger,omitempty"`
+	Domain         *string           `json:"domain,omitempty"`
+	Port           *string           `json:"port,omitempty"`
+	Minutes        *string           `json:"minutes,omitempty"`
+	MinPort        *string           `json:"min_port,omitempty"`
+	MaxPort        *string           `json:"max_port,omitempty"`
+	Reset          bool              `json:"reset,omitempty"`
+}
+
+type ContextAliasEdit struct {
+	ConfigPath  string            `json:"config_path"`
+	Fingerprint string            `json:"fingerprint"`
+	Aliases     map[string]string `json:"aliases"`
 }
 
 type ContextEdit struct {
@@ -50,6 +57,12 @@ func (e Edit) Apply(c *Config) error {
 		if !selection.On {
 			c.Kubernetes.ExcludedContexts = append(c.Kubernetes.ExcludedContexts, selection.Name)
 		}
+	}
+	if aliases := e.ContextAliases; aliases != nil {
+		if aliases.ConfigPath != c.Kubernetes.ConfigPath {
+			return errors.New("The kubeconfig changed. Reopen the context settings and try again.")
+		}
+		c.Kubernetes.MergeAliases(aliases.Aliases)
 	}
 	if e.Style != nil {
 		style := e.Style

@@ -7,6 +7,28 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func TestContextAliasPrecedence(t *testing.T) {
+	server := settings.Defaults("").Server
+	names := []string{"dev-1", "dev", "aws-prod"}
+	aliases := map[string]string{"dev-1": "dev", "aws-prod": "prod"}
+	for _, excluded := range [][]string{nil, {"dev-1"}} {
+		contexts := NewContextRoutes("dev", names, server, excluded, aliases)
+		target, err := contexts.Parse("a.default.dev.kuri.localhost")
+		if len(excluded) == 0 && (err != nil || target.Context != "dev-1") {
+			t.Fatalf("custom alias did not win: %+v %v", target, err)
+		}
+		if len(excluded) != 0 && err == nil {
+			t.Fatalf("disabled alias fell through: %+v", target)
+		}
+		if _, err := contexts.Parse("a.default.aws-prod.kuri.localhost"); err == nil {
+			t.Fatal("accepted original address for a renamed context")
+		}
+		if _, host := contexts.ForwardAddress(Target{Context: "aws-prod", Namespace: "default", Service: "a"}, "https", false); host != "https.a.default.prod.kuri.localhost" {
+			t.Fatalf("copy address: %s", host)
+		}
+	}
+}
+
 func TestForwardHostMatchesExplicitContext(t *testing.T) {
 	target := Target{Context: "cloud.prod", Namespace: "ns", Service: "api", Port: 8080}
 	alias := Alias(target.Context)

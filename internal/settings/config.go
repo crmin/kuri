@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"path/filepath"
 	"regexp"
@@ -27,8 +28,37 @@ type General struct {
 }
 
 type Kubernetes struct {
-	ConfigPath       string   `yaml:"config_path" json:"config_path"`
-	ExcludedContexts []string `yaml:"excluded_contexts" json:"excluded_contexts"`
+	ConfigPath       string                       `yaml:"config_path" json:"config_path"`
+	ExcludedContexts []string                     `yaml:"excluded_contexts" json:"excluded_contexts"`
+	ContextAliases   map[string]map[string]string `yaml:"context_aliases,omitempty" json:"context_aliases,omitempty"`
+}
+
+func (k Kubernetes) Aliases() map[string]string {
+	return k.ContextAliases[k.ConfigPath]
+}
+
+func (k *Kubernetes) MergeAliases(changes map[string]string) {
+	profiles := maps.Clone(k.ContextAliases)
+	if profiles == nil {
+		profiles = make(map[string]map[string]string)
+	}
+	aliases := maps.Clone(k.Aliases())
+	if aliases == nil {
+		aliases = make(map[string]string)
+	}
+	for name, alias := range changes {
+		if alias == name {
+			delete(aliases, name)
+		} else {
+			aliases[name] = alias
+		}
+	}
+	if len(aliases) == 0 {
+		delete(profiles, k.ConfigPath)
+	} else {
+		profiles[k.ConfigPath] = aliases
+	}
+	k.ContextAliases = profiles
 }
 
 type Server struct {
@@ -46,7 +76,7 @@ type DomainStyles struct {
 const (
 	LastRequest           = "last_request"
 	ForwardOpened         = "forward_opened"
-	SettingsSchemaVersion = 1
+	SettingsSchemaVersion = 2
 	defaultCheckSeconds   = 10
 )
 
@@ -72,6 +102,7 @@ func Defaults(home string) Config {
 }
 
 var domainLabel = regexp.MustCompile("^[A-Za-z0-9_~!$&'()*+,;=-]+$")
+var contextAliasLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func (c *Config) Validate() error {
 	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(c.Server.Domain), "."))
@@ -110,12 +141,46 @@ func (c *Config) Validate() error {
 	}
 	c.Server.Domain = domain
 	c.Kubernetes.ConfigPath = filepath.Clean(c.Kubernetes.ConfigPath)
+	if err := c.Kubernetes.validateAliases(); err != nil {
+		return err
+	}
 	excluded := slices.Clone(c.Kubernetes.ExcludedContexts)
 	slices.Sort(excluded)
 	c.Kubernetes.ExcludedContexts = slices.Compact(excluded)
 	if c.Kubernetes.ExcludedContexts == nil {
 		c.Kubernetes.ExcludedContexts = []string{}
 	}
+	return nil
+}
+
+func (k *Kubernetes) validateAliases() error {
+	if len(k.ContextAliases) == 0 {
+		return nil
+	}
+	profiles := make(map[string]map[string]string)
+	for path, aliases := range k.ContextAliases {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return errors.New("Use an absolute, normalized kubeconfig path for stored aliases.")
+		}
+		validated := make(map[string]string)
+		used := make(map[string]bool)
+		for name, alias := range aliases {
+			if name == alias && name != "" {
+				continue
+			}
+			if name == "" || !contextAliasLabel.MatchString(alias) {
+				return errors.New("Enter an alias of up to 63 lowercase letters, digits, or hyphens. Start and end with a letter or digit.")
+			}
+			if used[alias] {
+				return fmt.Errorf("The alias %q is already assigned to another context.", alias)
+			}
+			used[alias], validated[name] = true, alias
+		}
+		if len(validated) > 0 {
+			profiles[path] = validated
+		}
+	}
+	k.ContextAliases = profiles
 	return nil
 }
 
@@ -143,6 +208,9 @@ func (f PortForward) CheckInterval() time.Duration {
 }
 
 func (c Config) RequiredSchemaVersion() int {
+	if len(c.Kubernetes.ContextAliases) > 0 {
+		return 2
+	}
 	if c.PortForward.AutoHealing != nil || c.PortForward.CheckSeconds != nil {
 		return 1
 	}

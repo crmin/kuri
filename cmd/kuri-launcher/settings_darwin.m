@@ -109,6 +109,13 @@ static NSString *settingsString(id value) {
 @property(nonatomic, retain) NSDictionary *saved;
 @property(nonatomic, retain) NSDictionary *pending;
 @property(nonatomic, retain) NSString *settingsPath;
+@property(nonatomic, retain) NSString *kubeconfigFingerprint;
+@property(nonatomic, retain) NSDictionary *contextAliases;
+@property(nonatomic, retain) NSWindow *dialog;
+@property(nonatomic, retain) NSDictionary *aliasTarget;
+@property(nonatomic, retain) NSTextField *aliasField;
+@property(nonatomic, retain) NSTextField *aliasError;
+@property(nonatomic, retain) NSButton *aliasSave;
 @property(nonatomic) BOOL busy;
 @property(nonatomic) BOOL loaded;
 @property(nonatomic) BOOL corrupt;
@@ -434,7 +441,10 @@ static NSString *settingsString(id value) {
     for (NSStackView *row in self.contexts.arrangedSubviews) {
         NSSwitch *toggle = (NSSwitch *)row.arrangedSubviews.lastObject;
         toggle.enabled = self.loaded && !self.busy && !self.corrupt;
+        NSButton *alias = (NSButton *)row.arrangedSubviews[1];
+        alias.enabled = toggle.enabled;
     }
+    self.aliasSave.enabled = !self.busy;
 }
 
 - (NSDictionary *)draft {
@@ -498,6 +508,8 @@ static NSString *settingsString(id value) {
         }
 
         self.settingsPath = settingsString(kube[@"config_path"]);
+        self.kubeconfigFingerprint = settingsString(response[@"kubeconfig_fingerprint"]);
+        self.contextAliases = kube[@"context_aliases"][self.settingsPath] ?: @{};
         NSString *displayPath = self.settingsPath;
         if (displayPath.length > 33) {
             NSRange head = [displayPath rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, 15)];
@@ -530,6 +542,14 @@ static NSString *settingsString(id value) {
     self.busy = NO;
     self.pending = nil;
     [self updateControls];
+    if (pending[@"context_aliases"] && self.aliasTarget) {
+        if (saved) {
+            [self closeDialog:nil];
+        } else {
+            self.aliasError.stringValue = error ?: @"Could not save the context alias.";
+            self.aliasError.hidden = NO;
+        }
+    }
     if (portError.length || (error.length && !saved && (hostEdit || forwardEdit))) {
         [self selectTab:@"Network"];
         [self reveal:(hostEdit || portError.length) ? self.serverError : self.forwardError];
@@ -554,10 +574,26 @@ static NSString *settingsString(id value) {
     }
     for (NSString *name in names) {
         NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
+        NSStackView *names = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 5);
         NSTextField *title = settingsLabel(name, NSColor.labelColor);
         title.font = settingsItemFont();
         title.lineBreakMode = NSLineBreakByCharWrapping;
-        [row addArrangedSubview:title];
+        [names addArrangedSubview:title];
+        NSString *alias = self.contextAliases[name];
+        if (alias.length && ![alias isEqualToString:name]) {
+            NSTextField *aliasLabel = settingsLabel([NSString stringWithFormat:@"(%@)", alias], NSColor.secondaryLabelColor);
+            aliasLabel.lineBreakMode = NSLineBreakByCharWrapping;
+            [names addArrangedSubview:aliasLabel];
+        }
+        [row addArrangedSubview:names];
+        NSButton *more = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"ellipsis.circle" accessibilityDescription:nil]
+            target:self action:@selector(openAlias:)];
+        more.bordered = NO;
+        more.identifier = name;
+        more.toolTip = @"Edit context alias";
+        [more setAccessibilityLabel:[@"Edit alias for " stringByAppendingString:name]];
+        [more.widthAnchor constraintEqualToConstant:22].active = YES;
+        [row addArrangedSubview:more];
         NSSwitch *toggle = [[[NSSwitch alloc] initWithFrame:NSZeroRect] autorelease];
         [toggle.widthAnchor constraintEqualToConstant:42].active = YES;
         [toggle setAccessibilityLabel:name];
@@ -568,6 +604,87 @@ static NSString *settingsString(id value) {
         [row addArrangedSubview:toggle];
         addFullWidth(self.contexts, row);
     }
+}
+
+- (NSStackView *)createDialog:(NSString *)title size:(NSSize)size {
+    NSWindow *window = [[[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, size.width, size.height)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO] autorelease];
+    window.title = title;
+    window.delegate = self;
+    window.releasedWhenClosed = NO;
+    self.dialog = window;
+    NSView *content = window.contentView;
+    NSStackView *stack = settingsStack(NSUserInterfaceLayoutOrientationVertical, 10);
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:22],
+        [stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-22],
+        [stack.topAnchor constraintEqualToAnchor:content.topAnchor constant:20],
+        [stack.bottomAnchor constraintLessThanOrEqualToAnchor:content.bottomAnchor constant:-20],
+    ]];
+    return stack;
+}
+
+- (void)showDialog {
+    [self.dialog center];
+    [self.window addChildWindow:self.dialog ordered:NSWindowAbove];
+    [self.dialog makeKeyAndOrderFront:nil];
+}
+
+- (NSStackView *)dialogActions:(NSString *)title action:(SEL)action in:(NSStackView *)stack {
+    NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 8);
+    NSView *space = [[[NSView alloc] initWithFrame:NSZeroRect] autorelease];
+    [row addArrangedSubview:space];
+    NSButton *cancel = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(closeDialog:)];
+    cancel.keyEquivalent = @"\e";
+    [row addArrangedSubview:cancel];
+    NSButton *confirm = [NSButton buttonWithTitle:title target:self action:action];
+    confirm.keyEquivalent = @"\r";
+    [row addArrangedSubview:confirm];
+    addFullWidth(stack, row);
+    return row;
+}
+
+- (void)openAlias:(NSButton *)sender {
+    if (self.dialog || self.busy || !self.kubeconfigFingerprint.length) return;
+    NSString *name = sender.identifier;
+    self.aliasTarget = @{@"name": name, @"config_path": self.settingsPath, @"fingerprint": self.kubeconfigFingerprint};
+    NSStackView *stack = [self createDialog:name size:NSMakeSize(460, 230)];
+    [stack addArrangedSubview:settingsItemLabel(@"Alias")];
+    [self addDescription:@"Use this alias in the context part of a service domain." to:stack];
+    NSString *alias = self.contextAliases[name];
+    if (alias.length) [self addDescription:[@"Current alias: " stringByAppendingString:alias] to:stack];
+    self.aliasField = [NSTextField textFieldWithString:name];
+    [self.aliasField setAccessibilityLabel:@"Alias"];
+    addFullWidth(stack, self.aliasField);
+    self.aliasError = settingsLabel(@"", NSColor.systemRedColor);
+    self.aliasError.hidden = YES;
+    addFullWidth(stack, self.aliasError);
+    self.aliasSave = (NSButton *)[self dialogActions:@"Save" action:@selector(saveAlias:) in:stack].arrangedSubviews.lastObject;
+    [self showDialog];
+    [self.dialog makeFirstResponder:self.aliasField];
+}
+
+- (void)saveAlias:(id)sender {
+    if (self.busy || !self.aliasTarget) return;
+    if (![self.dialog makeFirstResponder:nil]) return;
+    self.aliasError.hidden = YES;
+    [self submit:@{@"context_aliases": @{@"config_path": self.aliasTarget[@"config_path"],
+        @"fingerprint": self.aliasTarget[@"fingerprint"], @"aliases": @{self.aliasTarget[@"name"]: self.aliasField.stringValue}}}];
+}
+
+- (void)closeDialog:(id)sender {
+    if (!self.dialog || self.busy) return;
+    [self.window removeChildWindow:self.dialog];
+    [self.dialog orderOut:nil];
+    self.dialog.delegate = nil;
+    self.dialog = nil;
+    self.aliasTarget = nil;
+    self.aliasField = nil;
+    self.aliasError = nil;
+    self.aliasSave = nil;
+    [self.window makeKeyAndOrderFront:nil];
 }
 
 - (void)renderStyles:(NSDictionary *)server {
@@ -693,6 +810,10 @@ static NSString *settingsString(id value) {
 
 - (void)confirmClose:(BOOL)quit {
     if (self.busy || self.confirmingClose || self.window.attachedSheet) return;
+    if (self.dialog) {
+        [self.dialog makeKeyAndOrderFront:nil];
+        return;
+    }
     NSDictionary *draft = [self draft];
     if (!draft.count) {
         [self dismiss:quit];
@@ -718,6 +839,10 @@ static NSString *settingsString(id value) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
+    if (sender == self.dialog) {
+        [self closeDialog:nil];
+        return NO;
+    }
     [self confirmClose:NO];
     return NO;
 }

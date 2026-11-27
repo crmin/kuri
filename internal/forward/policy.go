@@ -44,13 +44,16 @@ func (s *probeSchedule) update(policy healingPolicy) {
 
 // UpdatePolicy makes new acquisitions follow the saved range and keep-alive
 // rules. Requests already using a retired forward can finish on its lease.
-func (m *Manager) UpdatePolicy(policy settings.PortForward, enabled func(string) bool) {
+func (m *Manager) UpdatePolicy(policy settings.PortForward, enabled func(string) bool, routes ...route.Contexts) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.minPort, m.maxPort = policy.MinPort, policy.MaxPort+1
 	m.updateHealingLocked(policy)
 	m.keepAlive = policy.KeepAlive
 	m.enabled = enabled
+	if len(routes) > 0 {
+		m.routes = &routes[0]
+	}
 	m.lifetime, m.trigger = 0, ""
 	if policy.KeepAlive {
 		m.lifetime, m.trigger = policy.Duration(), policy.Trigger
@@ -63,6 +66,10 @@ func (m *Manager) UpdatePolicy(policy settings.PortForward, enabled func(string)
 		}
 		if e.lease != nil && !m.containsPortLocked(e.lease.LocalPort) {
 			m.retireLocked(e, errExpired)
+			continue
+		}
+		if e.lease != nil && !m.refreshProbeHostLocked(e.lease) {
+			m.retireLocked(e, errRouteChanged)
 			continue
 		}
 		if !e.opened.IsZero() {
@@ -78,9 +85,30 @@ func (m *Manager) UpdatePolicy(policy settings.PortForward, enabled func(string)
 			e.wakeLocked()
 		}
 	}
+	for e := range m.ephemeral {
+		m.refreshProbeHostLocked(e.lease)
+	}
 	m.ports.mu.Lock()
 	m.ports.signal()
 	m.ports.mu.Unlock()
+}
+
+func (m *Manager) refreshProbeHostLocked(lease *Lease) bool {
+	if m.routes == nil {
+		return true
+	}
+	dest := lease.Destination
+	isDefault := route.ResolvedSelector(dest.Target, dest.PortName) == dest.DefaultPort
+	host := lease.probeAuthority()
+	if m.routes.Matches(host, dest.Target, dest.PortName, isDefault) {
+		return true
+	}
+	_, host = m.routes.ForwardAddress(dest.Target, dest.PortName, isDefault)
+	if host == "" {
+		return false
+	}
+	lease.probeHost.Store(&host)
+	return true
 }
 
 func (m *Manager) updateHealingLocked(policy settings.PortForward) {
@@ -145,6 +173,7 @@ func (m *Manager) acquireEphemeral(ctx context.Context, req route.Request) (*Lea
 	e.key = route.ResolvedSelector(lease.Destination.Target, lease.Destination.PortName)
 	e.lease, e.lastAccess = lease, time.Now()
 	m.mu.Lock()
+	m.refreshProbeHostLocked(lease)
 	m.ephemeral[e] = struct{}{}
 	m.updateRecentDefaultLocked(e.key.ServiceTarget(), lease.Destination.DefaultPort)
 	m.recordLocked(e)

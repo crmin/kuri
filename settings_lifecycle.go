@@ -8,15 +8,17 @@ import (
 	"time"
 
 	"github.com/crmin/kuri/internal/daemon"
+	"github.com/crmin/kuri/internal/forward"
 	"github.com/crmin/kuri/internal/launchd"
 	"github.com/crmin/kuri/internal/settings"
 )
 
 var errKubeContextChanged = errors.New("The selected context is no longer in this kubeconfig.")
+var errKubeconfigChanged = errors.New("The kubeconfig changed. Review the current contexts and try again.")
 
 type settingsServer interface {
 	State(context.Context) (daemon.State, error)
-	ApplySettings(context.Context, daemon.State, string, bool) (daemon.State, error)
+	ApplySettings(context.Context, daemon.State, string, bool, ...string) (daemon.State, error)
 	Start(context.Context) (int, error)
 	Stop(context.Context) (int, error)
 	HoldProxyForRegistration(context.Context, func(daemon.State) error) (io.Closer, bool, error)
@@ -144,7 +146,19 @@ func updateSettings(ctx context.Context, app settingsServer, home string, edit s
 		}
 		return settingsResult{saved: true, applied: true}
 	}
-	if err := applySettings(ctx, app, state, saved, !explicitPort); err != nil {
+	var kubeconfigFingerprint string
+	if edit.ContextAliases != nil {
+		kubeconfigFingerprint = edit.ContextAliases.Fingerprint
+	} else if edit == (settings.Edit{}) && state.KubeconfigFingerprint != "" {
+		if len(saved.Kubernetes.Aliases()) > 0 {
+			kube, _, err := forward.LoadKubernetes(saved.Kubernetes.ConfigPath)
+			if err != nil {
+				return settingsResult{saved: true, err: err}
+			}
+			kubeconfigFingerprint = kube.Fingerprint()
+		}
+	}
+	if err := applySettings(ctx, app, state, saved, !explicitPort, kubeconfigFingerprint); err != nil {
 		return settingsResult{saved: true, err: err}
 	}
 	return settingsResult{saved: true, applied: true}
@@ -167,7 +181,7 @@ func applySavedSettings(ctx context.Context, app settingsServer, state daemon.St
 	return applySettings(ctx, app, state, cfg, false)
 }
 
-func applySettings(ctx context.Context, app settingsServer, state daemon.State, cfg settings.Config, retainPort bool) error {
+func applySettings(ctx context.Context, app settingsServer, state daemon.State, cfg settings.Config, retainPort bool, kubeconfig ...string) error {
 	if state.PID == 0 {
 		return nil
 	}
@@ -176,14 +190,19 @@ func applySettings(ctx context.Context, app settingsServer, state daemon.State, 
 	if retainPort {
 		cfg.Server.Port = state.Port
 	}
-	if state.ProxyFingerprint == cfg.ProxyFingerprint() {
+	var expectedKubeconfig string
+	if len(kubeconfig) > 0 {
+		expectedKubeconfig = kubeconfig[0]
+	}
+	if state.ProxyFingerprint == cfg.ProxyFingerprint() && (expectedKubeconfig == "" || expectedKubeconfig == state.KubeconfigFingerprint) {
 		return nil
 	}
-	applied, err := app.ApplySettings(ctx, state, fingerprint, retainPort)
+	applied, err := app.ApplySettings(ctx, state, fingerprint, retainPort, expectedKubeconfig)
 	if err != nil {
 		return err
 	}
-	if applied.ProxyFingerprint != cfg.ProxyFingerprint() || applied.Port != cfg.Server.Port {
+	if applied.ProxyFingerprint != cfg.ProxyFingerprint() || applied.Port != cfg.Server.Port ||
+		(expectedKubeconfig != "" && applied.KubeconfigFingerprint != expectedKubeconfig) {
 		return errors.New("The reverse proxy did not confirm the saved settings.")
 	}
 	return nil

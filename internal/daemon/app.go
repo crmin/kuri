@@ -302,7 +302,7 @@ func (app *App) State(ctx context.Context) (State, error) {
 	return readState(ctx, conn, pid)
 }
 
-func (app *App) ApplySettings(ctx context.Context, state State, fingerprint string, retainPort bool) (State, error) {
+func (app *App) ApplySettings(ctx context.Context, state State, fingerprint string, retainPort bool, kubeconfig ...string) (State, error) {
 	if state.ProxyFingerprint == "" {
 		return State{}, ErrIncompatible
 	}
@@ -310,7 +310,11 @@ func (app *App) ApplySettings(ctx context.Context, state State, fingerprint stri
 	if retainPort {
 		action = "apply_settings_retain_port"
 	}
-	return app.sendRuntimeCommand(ctx, state, request{Action: action, Fingerprint: fingerprint})
+	req := request{Action: action, Fingerprint: fingerprint}
+	if len(kubeconfig) > 0 {
+		req.KubeconfigFingerprint = kubeconfig[0]
+	}
+	return app.sendRuntimeCommand(ctx, state, req)
 }
 
 func (app *App) sendRuntimeCommand(ctx context.Context, state State, req request) (State, error) {

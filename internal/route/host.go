@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -53,6 +54,7 @@ type Contexts struct {
 	current string
 	names   map[string]bool
 	aliases map[string]string
+	custom  map[string]string
 	server  settings.Server
 }
 
@@ -61,15 +63,32 @@ func NewContexts(current string, names []string) Contexts {
 }
 
 func NewConfiguredContexts(current string, names []string, server settings.Server) Contexts {
-	contexts := Contexts{current: current, names: make(map[string]bool), aliases: make(map[string]string), server: server}
+	return NewContextRoutes(current, names, server, nil, nil)
+}
+
+func NewContextRoutes(current string, names []string, server settings.Server, excluded []string, custom map[string]string) Contexts {
+	contexts := Contexts{current: current, names: make(map[string]bool), aliases: make(map[string]string),
+		custom: make(map[string]string), server: server}
 	for _, name := range names {
+		if alias := custom[name]; alias != "" {
+			contexts.custom[name] = alias
+		}
+		if slices.Contains(excluded, name) {
+			continue
+		}
 		contexts.names[name] = true
+		if contexts.custom[name] != "" {
+			continue
+		}
 		alias := Alias(name)
 		if existing, ok := contexts.aliases[alias]; ok && existing != name {
 			contexts.aliases[alias] = ""
 		} else {
 			contexts.aliases[alias] = name
 		}
+	}
+	for name, alias := range contexts.custom {
+		contexts.aliases[alias] = name
 	}
 	return contexts
 }
@@ -94,7 +113,11 @@ func ForwardLabel(target Target, portName string, defaultPort bool) string {
 
 func (c Contexts) ForwardAddress(target Target, portName string, defaultPort bool) (label, authority string) {
 	base := target.Service + "." + target.Namespace
-	explicit := base + "." + Alias(target.Context)
+	alias := c.custom[target.Context]
+	if alias == "" {
+		alias = Alias(target.Context)
+	}
+	explicit := base + "." + alias
 	var options []string
 	if defaultPort {
 		options = append(options, explicit, base)
@@ -102,15 +125,9 @@ func (c Contexts) ForwardAddress(target Target, portName string, defaultPort boo
 	if portName != "" {
 		options = append(options, portName+"."+explicit)
 	}
-	service := target
-	service.Port = 0
 	for _, label := range options {
 		host := label + "." + c.server.Domain
-		got, err := c.Parse(host)
-		if err != nil {
-			continue
-		}
-		if got.Target != service || (got.PortName != portName && !(defaultPort && got.IsDefault())) {
+		if !c.Matches(host, target, portName, defaultPort) {
 			continue
 		}
 		if c.server.Port != 80 {
@@ -118,7 +135,16 @@ func (c Contexts) ForwardAddress(target Target, portName string, defaultPort boo
 		}
 		return label, host
 	}
-	return ForwardLabel(target, portName, defaultPort), ""
+	if !defaultPort && portName != "" {
+		explicit = portName + "." + explicit
+	}
+	return explicit, ""
+}
+
+func (c Contexts) Matches(host string, target Target, portName string, defaultPort bool) bool {
+	target.Port = 0
+	got, err := c.Parse(host)
+	return err == nil && got.Target == target && (got.PortName == portName || (defaultPort && got.IsDefault()))
 }
 
 func normalizeHost(host, suffix string) (string, error) {
@@ -167,7 +193,7 @@ func (c Contexts) Parse(host string) (Request, error) {
 	context := c.current
 	if len(labels) == 3 {
 		context = c.aliases[labels[2]]
-		if context == "" {
+		if !c.names[context] {
 			return Request{}, errors.New("unknown or ambiguous Kubernetes context in host")
 		}
 	} else if !c.names[context] {

@@ -38,29 +38,31 @@ var (
 )
 
 type State struct {
-	PID              int              `json:"pid"`
-	Mode             string           `json:"mode"`
-	Started          time.Time        `json:"started"`
-	Rows             []forward.Row    `json:"services"`
-	Token            string           `json:"token,omitempty"`
-	Port             int              `json:"port,omitempty"`
-	ProxyFingerprint string           `json:"proxy_fingerprint,omitempty"`
-	Activated        bool             `json:"activated,omitempty"`
-	ForegroundOwner  int              `json:"foreground_owner,omitempty"`
-	AppliedSettings  *settings.Config `json:"applied_settings,omitempty"`
-	SettingsSchema   int              `json:"settings_schema,omitempty"`
+	PID                   int              `json:"pid"`
+	Mode                  string           `json:"mode"`
+	Started               time.Time        `json:"started"`
+	Rows                  []forward.Row    `json:"services"`
+	Token                 string           `json:"token,omitempty"`
+	Port                  int              `json:"port,omitempty"`
+	ProxyFingerprint      string           `json:"proxy_fingerprint,omitempty"`
+	Activated             bool             `json:"activated,omitempty"`
+	ForegroundOwner       int              `json:"foreground_owner,omitempty"`
+	AppliedSettings       *settings.Config `json:"applied_settings,omitempty"`
+	SettingsSchema        int              `json:"settings_schema,omitempty"`
+	KubeconfigFingerprint string           `json:"kubeconfig_fingerprint,omitempty"`
 }
 
 type request struct {
-	Version           int    `json:"version"`
-	Action            string `json:"action"`
-	Token             string `json:"token,omitempty"`
-	Menu              bool   `json:"menu,omitempty"`
-	Automatic         bool   `json:"automatic,omitempty"`
-	History           bool   `json:"history,omitempty"`
-	Fingerprint       string `json:"fingerprint,omitempty"`
-	ForegroundHandoff bool   `json:"foreground_handoff,omitempty"`
-	PortChange        string `json:"port_change,omitempty"`
+	Version               int    `json:"version"`
+	Action                string `json:"action"`
+	Token                 string `json:"token,omitempty"`
+	Menu                  bool   `json:"menu,omitempty"`
+	Automatic             bool   `json:"automatic,omitempty"`
+	History               bool   `json:"history,omitempty"`
+	Fingerprint           string `json:"fingerprint,omitempty"`
+	KubeconfigFingerprint string `json:"kubeconfig_fingerprint,omitempty"`
+	ForegroundHandoff     bool   `json:"foreground_handoff,omitempty"`
+	PortChange            string `json:"port_change,omitempty"`
 }
 
 type reply struct {

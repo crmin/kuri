@@ -84,6 +84,7 @@ type Manager struct {
 	enabled   func(string) bool
 	history   []Row
 	healing   healingPolicy
+	routes    *route.Contexts
 }
 
 type portPool struct {
@@ -389,6 +390,9 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 			err = errExpired
 			break
 		}
+		// A request admitted by the previous handler can still finish on its
+		// lease. The next policy update can retire it if the address changed.
+		m.refreshProbeHostLocked(lease)
 		e.candidates = nil
 		e.lease = lease
 		e.notifyLocked()
@@ -510,10 +514,11 @@ func (m *Manager) watch(e *entry, lease *Lease) context.Context {
 			}
 			ctx, cancel := context.WithTimeout(e.ctx, probeTimeout)
 			stop := context.AfterFunc(policy.ctx, cancel)
+			host := lease.probeAuthority()
 			err := m.probe(ctx, lease)
 			stop()
 			cancel()
-			if err != nil && policy.ctx.Err() == nil {
+			if err != nil && policy.ctx.Err() == nil && host == lease.probeAuthority() {
 				if current := m.recoveryScope(e); current == policy.ctx {
 					return current
 				}
@@ -646,6 +651,13 @@ func (m *Manager) open(ctx context.Context, e *entry, destinations []Destination
 			}
 			lease := newLease(destination, e.host, port, tunnel)
 			if verify {
+				m.mu.Lock()
+				routable := m.refreshProbeHostLocked(lease)
+				m.mu.Unlock()
+				if !routable {
+					m.release(e, lease)
+					return nil, errRouteUnavailable
+				}
 				check, cancel := context.WithTimeout(ctx, probeTimeout)
 				err := m.probe(check, lease)
 				cancel()

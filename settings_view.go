@@ -10,18 +10,19 @@ import (
 )
 
 type settingsView struct {
-	Config            settings.Config `json:"config"`
-	Contexts          []string        `json:"contexts"`
-	FileError         string          `json:"file_error,omitempty"`
-	KubeconfigError   string          `json:"kubeconfig_error,omitempty"`
-	ProxyUpdateNeeded bool            `json:"proxy_update_needed,omitempty"`
-	RegistrationError string          `json:"registration_error,omitempty"`
-	RuntimeWarning    string          `json:"runtime_warning,omitempty"`
-	ApplyPending      bool            `json:"apply_pending,omitempty"`
-	Error             string          `json:"error,omitempty"`
-	PortError         string          `json:"port_error,omitempty"`
-	Saved             bool            `json:"saved"`
-	Applied           bool            `json:"applied"`
+	Config                settings.Config `json:"config"`
+	Contexts              []string        `json:"contexts"`
+	KubeconfigFingerprint string          `json:"kubeconfig_fingerprint,omitempty"`
+	FileError             string          `json:"file_error,omitempty"`
+	KubeconfigError       string          `json:"kubeconfig_error,omitempty"`
+	ProxyUpdateNeeded     bool            `json:"proxy_update_needed,omitempty"`
+	RegistrationError     string          `json:"registration_error,omitempty"`
+	RuntimeWarning        string          `json:"runtime_warning,omitempty"`
+	ApplyPending          bool            `json:"apply_pending,omitempty"`
+	Error                 string          `json:"error,omitempty"`
+	PortError             string          `json:"port_error,omitempty"`
+	Saved                 bool            `json:"saved"`
+	Applied               bool            `json:"applied"`
 }
 
 func loadSettingsView(ctx context.Context, home string, app settingsServer) settingsView {
@@ -48,9 +49,12 @@ func loadSettingsView(ctx context.Context, home string, app settingsServer) sett
 		view.KubeconfigError = err.Error()
 	} else {
 		view.Contexts = kube.ContextNames()
+		view.KubeconfigFingerprint = kube.Fingerprint()
 	}
 	if view.FileError == "" {
-		if state, err := app.State(ctx); err == nil && state.PID != 0 && state.ProxyFingerprint != view.Config.ProxyFingerprint() {
+		if state, err := app.State(ctx); err == nil && state.PID != 0 &&
+			(state.ProxyFingerprint != view.Config.ProxyFingerprint() ||
+				(len(view.Config.Kubernetes.Aliases()) > 0 && view.KubeconfigFingerprint != state.KubeconfigFingerprint)) {
 			view.ApplyPending = true
 			view.RuntimeWarning = "The reverse proxy has settings waiting to be applied."
 			if state.ProxyFingerprint == "" {
@@ -62,7 +66,7 @@ func loadSettingsView(ctx context.Context, home string, app settingsServer) sett
 }
 
 func validateKubernetesEdit(cfg settings.Config, edit settings.Edit) error {
-	if edit.ConfigPath == nil && edit.Context == nil {
+	if edit.ConfigPath == nil && edit.Context == nil && edit.ContextAliases == nil {
 		return nil
 	}
 	kube, _, err := forward.LoadKubernetes(cfg.Kubernetes.ConfigPath)
@@ -71,6 +75,17 @@ func validateKubernetesEdit(cfg settings.Config, edit settings.Edit) error {
 	}
 	if edit.Context != nil && !slices.Contains(kube.ContextNames(), edit.Context.Name) {
 		return errKubeContextChanged
+	}
+	if aliases := edit.ContextAliases; aliases != nil {
+		if aliases.Fingerprint != kube.Fingerprint() {
+			return errKubeconfigChanged
+		}
+		names := kube.ContextNames()
+		for name := range aliases.Aliases {
+			if !slices.Contains(names, name) {
+				return errKubeContextChanged
+			}
+		}
 	}
 	return nil
 }

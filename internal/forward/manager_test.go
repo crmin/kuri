@@ -615,6 +615,32 @@ func TestLiveAutoHealingPolicy(t *testing.T) {
 	})
 }
 
+func TestAliasReloadUpdatesProbeHost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := testManager(stubBackend{})
+		defer manager.Close()
+		cfg := settings.Defaults("")
+		var probes atomic.Int32
+		manager.probe = func(_ context.Context, lease *Lease) error {
+			if got := lease.probeAuthority(); got != "api.default.renamed.kuri.localhost" {
+				t.Errorf("probe used old address %q", got)
+			}
+			probes.Add(1)
+			return nil
+		}
+		old := route.NewConfiguredContexts("dev", []string{"dev"}, cfg.Server)
+		manager.UpdatePolicy(cfg.PortForward, old.Enabled, old)
+		initial := acquire(t, manager, request("api"))
+		next := route.NewContextRoutes("dev", []string{"dev"}, cfg.Server, nil, map[string]string{"dev": "renamed"})
+		manager.UpdatePolicy(cfg.PortForward, next.Enabled, next)
+		time.Sleep(probeInterval)
+		synctest.Wait()
+		if got := acquire(t, manager, request("api")); got != initial || probes.Load() != 1 {
+			t.Fatal("alias reload replaced a healthy lease")
+		}
+	})
+}
+
 func TestAutoHealingChecksActiveEphemeralTunnel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		manager := testManager(stubBackend{})

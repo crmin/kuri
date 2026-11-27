@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crmin/kuri/internal/forward"
 	"github.com/crmin/kuri/internal/settings"
 	"golang.org/x/sys/unix"
 )
@@ -92,6 +93,32 @@ users:
 	}
 	checkHost("api.default.kuri.localhost", http.StatusBadRequest)
 	checkHost("api.default.example.com", http.StatusBadGateway)
+	// Add a context without changing the configured file path.
+	modified := strings.Replace(kubeconfig, "users:\n", "- name: new-context\n  context:\n    cluster: test\n    user: test\nusers:\n", 1)
+	if err := os.WriteFile(cfg.Kubernetes.ConfigPath, []byte(modified), 0600); err != nil {
+		t.Fatal(err)
+	}
+	kube, _, err := forward.LoadKubernetes(cfg.Kubernetes.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, updated, err = store.Update(ctx, func(c *settings.Config) error {
+		c.Kubernetes.MergeAliases(map[string]string{"new-context": "fresh"})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkHost("api.default.fresh.example.com", http.StatusBadRequest)
+	if _, err := app.ApplySettings(ctx, initial, updated.Fingerprint(), false, initial.KubeconfigFingerprint); err == nil {
+		t.Fatal("applied an alias against a stale kubeconfig")
+	}
+	state, err := app.ApplySettings(ctx, initial, updated.Fingerprint(), false, kube.Fingerprint())
+	if err != nil || state.KubeconfigFingerprint != kube.Fingerprint() || !state.Started.Equal(initial.Started) {
+		t.Fatalf("apply alias after replacing kubeconfig contents: %+v, %v", state, err)
+	}
+	checkHost("api.default.fresh.example.com", http.StatusBadGateway)
+	checkHost("api.default.new-context.example.com", http.StatusBadRequest)
 	_, updated, err = store.Update(ctx, func(c *settings.Config) error {
 		c.Kubernetes.ExcludedContexts = []string{"dev"}
 		return nil
