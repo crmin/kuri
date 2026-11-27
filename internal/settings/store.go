@@ -109,22 +109,14 @@ func (s Store) read() (Config, bool, error) {
 
 func (s Store) readAt(path string) (Config, bool, error) {
 	cfg := Defaults(s.home)
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	file, err := openSettingsFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, false, nil
 	}
 	if err != nil {
 		return Config{}, false, fmt.Errorf("open kuri settings: %w", err)
 	}
-	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return Config{}, true, err
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) || st.Mode&0022 != 0 || st.Size > maxSettingsSize {
-		return Config{}, true, errors.New("Unsafe kuri settings file.")
-	}
 	decoder := yaml.NewDecoder(io.LimitReader(file, maxSettingsSize+1))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
@@ -138,6 +130,24 @@ func (s Store) readAt(path string) (Config, bool, error) {
 		return Config{}, true, fmt.Errorf("read kuri settings: %w", err)
 	}
 	return cfg, true, nil
+}
+
+func openSettingsFile(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		file.Close()
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) || st.Mode&0022 != 0 || st.Size > maxSettingsSize {
+		file.Close()
+		return nil, errors.New("Unsafe kuri settings file.")
+	}
+	return file, nil
 }
 
 func (s Store) write(cfg Config) error {

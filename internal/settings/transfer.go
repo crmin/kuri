@@ -353,11 +353,13 @@ func (s Store) ExportTransfer(path string, fields []TransferField) error {
 	}
 	target := filepath.Join(parent, filepath.Base(path))
 	activeParent, _ := filepath.EvalSymlinks(s.Directory())
-	active, activeErr := os.Stat(s.Path())
 	chosen, chosenErr := os.Stat(target)
-	if filepath.Clean(path) == s.Path() || (activeParent != "" && target == filepath.Join(activeParent, filepath.Base(s.Path()))) ||
-		(activeErr == nil && chosenErr == nil && os.SameFile(active, chosen)) {
-		return errors.New("Choose a different file. kuri is using this settings file.")
+	for _, activePath := range []string{s.Path(), s.bookmarksPath()} {
+		active, activeErr := os.Stat(activePath)
+		if filepath.Clean(path) == activePath || (activeParent != "" && target == filepath.Join(activeParent, filepath.Base(activePath))) ||
+			(activeErr == nil && chosenErr == nil && os.SameFile(active, chosen)) {
+			return errors.New("Choose a different file. kuri is using this settings file.")
+		}
 	}
 	cfg, err := s.Read()
 	if err != nil {

@@ -113,11 +113,7 @@ func ForwardLabel(target Target, portName string, defaultPort bool) string {
 
 func (c Contexts) ForwardAddress(target Target, portName string, defaultPort bool) (label, authority string) {
 	base := target.Service + "." + target.Namespace
-	alias := c.custom[target.Context]
-	if alias == "" {
-		alias = Alias(target.Context)
-	}
-	explicit := base + "." + alias
+	explicit := base + "." + c.contextLabel(target.Context)
 	var options []string
 	if defaultPort {
 		options = append(options, explicit, base)
@@ -130,15 +126,39 @@ func (c Contexts) ForwardAddress(target Target, portName string, defaultPort boo
 		if !c.Matches(host, target, portName, defaultPort) {
 			continue
 		}
-		if c.server.Port != 80 {
-			host = net.JoinHostPort(host, strconv.Itoa(c.server.Port))
-		}
-		return label, host
+		return label, c.authority(host)
 	}
 	if !defaultPort && portName != "" {
 		explicit = portName + "." + explicit
 	}
 	return explicit, ""
+}
+
+// BookmarkAddress preserves the selected context and port name in the URL.
+func (c Contexts) BookmarkAddress(target Target, portName string) (label, authority string) {
+	label = target.Service + "." + target.Namespace + "." + c.contextLabel(target.Context)
+	if portName != "" {
+		label = portName + "." + label
+	}
+	host := label + "." + c.server.Domain
+	if c.Matches(host, target, portName, false) {
+		authority = c.authority(host)
+	}
+	return label, authority
+}
+
+func (c Contexts) contextLabel(name string) string {
+	if alias := c.custom[name]; alias != "" {
+		return alias
+	}
+	return Alias(name)
+}
+
+func (c Contexts) authority(host string) string {
+	if c.server.Port != 80 {
+		return net.JoinHostPort(host, strconv.Itoa(c.server.Port))
+	}
+	return host
 }
 
 func (c Contexts) Matches(host string, target Target, portName string, defaultPort bool) bool {

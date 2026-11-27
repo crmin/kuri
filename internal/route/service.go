@@ -9,7 +9,7 @@ import (
 
 func ChooseServicePort(ports []corev1.ServicePort, requested Selector) (corev1.ServicePort, error) {
 	for _, port := range ports {
-		if port.Protocol != "" && port.Protocol != corev1.ProtocolTCP {
+		if !IsTCPServicePort(port) {
 			continue
 		}
 		switch {
@@ -28,4 +28,8 @@ func ChooseServicePort(ports []corev1.ServicePort, requested Selector) (corev1.S
 		return corev1.ServicePort{}, fmt.Errorf("service has no unnamed TCP port %d", requested.Port)
 	}
 	return corev1.ServicePort{}, errors.New("service has no default TCP port")
+}
+
+func IsTCPServicePort(port corev1.ServicePort) bool {
+	return port.Protocol == "" || port.Protocol == corev1.ProtocolTCP
 }
