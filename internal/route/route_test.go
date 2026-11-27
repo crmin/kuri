@@ -169,3 +169,33 @@ func TestChooseServicePort(t *testing.T) {
 		})
 	}
 }
+
+func TestBookmarkAddress(t *testing.T) {
+	server := settings.Defaults("").Server
+	target := Target{Context: "cloud.prod", Namespace: "default", Service: "api"}
+	ctx := NewContextRoutes("dev", []string{"dev", target.Context}, server, nil, nil)
+	if _, got := ctx.BookmarkAddress(target, ""); got != "api.default."+Alias(target.Context)+".kuri.localhost" {
+		t.Fatal(got)
+	}
+	server.Port, server.Domain = 8080, "test.localhost"
+	aliases := map[string]string{target.Context: "live"}
+	ctx = NewContextRoutes("dev", []string{"dev", target.Context}, server, nil, aliases)
+	if _, got := ctx.BookmarkAddress(target, "http"); got != "http.api.default.live.test.localhost:8080" {
+		t.Fatal(got)
+	}
+	colliding := NewContextRoutes("dev", []string{"dev", target.Context, Alias(target.Context)}, server, nil, nil)
+	for _, portName := range []string{"", "http"} {
+		if _, got := colliding.BookmarkAddress(target, portName); got != "" {
+			t.Errorf("used the ambiguous alias for port %q: %s", portName, got)
+		}
+	}
+	server.Styles.ExplicitContext = false
+	ctx = NewContextRoutes(target.Context, []string{target.Context}, server, nil, aliases)
+	if _, got := ctx.BookmarkAddress(target, ""); got != "" {
+		t.Fatalf("fell back to a different domain form: %s", got)
+	}
+	ctx = NewContextRoutes("dev", []string{"dev", target.Context}, server, []string{target.Context}, aliases)
+	if _, got := ctx.BookmarkAddress(target, "http"); got != "" {
+		t.Fatalf("allowed excluded context: %s", got)
+	}
+}

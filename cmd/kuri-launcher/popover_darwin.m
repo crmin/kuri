@@ -1,6 +1,7 @@
 //go:build cgo
 
 #import "popover_darwin.h"
+#import "bookmarks_darwin.h"
 #import "settings_darwin.h"
 #import "shortcuts_darwin.h"
 
@@ -51,6 +52,7 @@ static const CGFloat recentCornerRadius = 12;
 @property(nonatomic, retain) NSTrackingArea *rowTrackingArea;
 @property(nonatomic) SEL hoverAction;
 @property(nonatomic) SEL leaveAction;
+@property(nonatomic, copy) NSString *secondaryTitle;
 - (void)setRowTitle:(NSString *)title;
 @end
 
@@ -65,10 +67,16 @@ static const CGFloat recentCornerRadius = 12;
     paragraph.lineBreakMode = NSLineBreakByTruncatingTail;
     paragraph.firstLineHeadIndent = 6;
     paragraph.tailIndent = -6;
-    self.attributedTitle = [[[NSAttributedString alloc] initWithString:title attributes:@{
+    NSMutableAttributedString *text = [[[NSMutableAttributedString alloc] initWithString:title attributes:@{
         NSForegroundColorAttributeName: color, NSFontAttributeName: self.font,
         NSParagraphStyleAttributeName: paragraph,
     }] autorelease];
+    if (self.enabled && self.secondaryTitle.length && [title hasSuffix:self.secondaryTitle]) {
+        NSColor *secondary = [self showsHighlight] ? [color colorWithAlphaComponent:0.78] : NSColor.secondaryLabelColor;
+        NSRange suffix = NSMakeRange(title.length - self.secondaryTitle.length, self.secondaryTitle.length);
+        [text addAttribute:NSForegroundColorAttributeName value:secondary range:suffix];
+    }
+    self.attributedTitle = text;
     self.needsDisplay = YES;
 }
 - (void)setEnabled:(BOOL)enabled {
@@ -109,6 +117,7 @@ static const CGFloat recentCornerRadius = 12;
 }
 - (void)dealloc {
     [_rowTrackingArea release];
+    [_secondaryTitle release];
     [super dealloc];
 }
 @end
@@ -127,6 +136,8 @@ static const CGFloat recentCornerRadius = 12;
     return YES;
 }
 @end
+
+@class KuriBookmarkMenuView;
 
 @interface KuriPopover ()
 @property(nonatomic, retain) NSPopover *popover;
@@ -159,6 +170,13 @@ static const CGFloat recentCornerRadius = 12;
 @property(nonatomic) NSInteger recentFocus;
 @property(nonatomic) BOOL recentAvailable;
 @property(nonatomic) BOOL recentEnabled;
+@property(nonatomic, retain) KuriRecentMenuButton *bookmarkButton;
+@property(nonatomic, retain) NSTextField *bookmarkArrow;
+@property(nonatomic, retain) NSPanel *bookmarkPanel;
+@property(nonatomic, retain) KuriBookmarkMenuView *bookmarkMenu;
+@property(nonatomic) NSUInteger bookmarkRequest;
+- (void)layoutBookmarks;
+- (void)scheduleBookmarkClose:(id)sender;
 @end
 
 static const CGFloat width = 346;
@@ -205,6 +223,261 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     return button;
 }
 
+@interface KuriBookmarkPanel : NSPanel
+@end
+
+@implementation KuriBookmarkPanel
+- (BOOL)canBecomeKeyWindow { return YES; }
+@end
+
+static NSPanel *serviceMenuPanel(Class panelClass) {
+    NSPanel *panel = [[[panelClass alloc] initWithContentRect:NSMakeRect(0, 0, 280, 40)
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        backing:NSBackingStoreBuffered defer:NO] autorelease];
+    panel.releasedWhenClosed = NO;
+    panel.hasShadow = YES;
+    panel.opaque = NO;
+    panel.backgroundColor = NSColor.clearColor;
+    NSVisualEffectView *surface = [[[NSVisualEffectView alloc] initWithFrame:panel.contentView.bounds] autorelease];
+    surface.material = NSVisualEffectMaterialMenu;
+    surface.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    surface.state = NSVisualEffectStateActive;
+    surface.maskImage = recentMenuMask();
+    panel.contentView = surface;
+    return panel;
+}
+
+NSRect kuriServiceMenuFrame(NSRect parent, NSRect anchor, NSRect usable, NSSize size) {
+    CGFloat paneWidth = MIN(size.width, NSWidth(usable)), height = MIN(size.height, NSHeight(usable));
+    CGFloat x = NSMaxX(parent) + 3;
+    if (x + paneWidth > NSMaxX(usable)) x = NSMinX(parent) - paneWidth - 3;
+    x = MAX(NSMinX(usable), MIN(x, NSMaxX(usable) - paneWidth));
+    CGFloat y = MAX(NSMinY(usable), MIN(NSMaxY(anchor) + recentInset - height, NSMaxY(usable) - height));
+    return NSMakeRect(x, y, paneWidth, height);
+}
+
+static BOOL copyServiceURL(NSString *url, NSPasteboard *clipboard) {
+    if (!url.length) return NO;
+    [clipboard clearContents];
+    return [clipboard setString:url forType:NSPasteboardTypeString];
+}
+
+@interface KuriBookmarkMenuView : KuriRecentMenuCanvas <NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate>
+@property(nonatomic, assign) KuriPopover *owner;
+@property(nonatomic, retain) NSSearchField *search;
+@property(nonatomic, retain) NSBox *separator;
+@property(nonatomic, retain) NSScrollView *list;
+@property(nonatomic, retain) NSTableView *table;
+@property(nonatomic, retain) NSTextField *status;
+@property(nonatomic, copy) NSArray<NSDictionary *> *rows;
+@property(nonatomic, copy) NSArray<NSDictionary *> *visibleRows;
+@property(nonatomic, retain) NSMutableDictionary<NSString *, NSUUID *> *feedback;
+@property(nonatomic, copy) NSString *message;
+@property(nonatomic) NSInteger focus;
+- (void)displayRows:(NSArray *)rows message:(NSString *)message;
+- (void)filter;
+- (CGFloat)desiredHeight;
+- (void)reset;
+- (BOOL)handleKey:(NSEvent *)event;
+@end
+
+@implementation KuriBookmarkMenuView
+static const CGFloat bookmarkListTop = 42;
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.search = [[[NSSearchField alloc] initWithFrame:NSZeroRect] autorelease];
+    self.search.placeholderString = @"Search...";
+    self.search.delegate = self;
+    [self.search setAccessibilityLabel:@"Search bookmarked services"];
+    [self addSubview:self.search];
+    self.separator = line();
+    [self addSubview:self.separator];
+    self.list = [[[NSScrollView alloc] initWithFrame:NSZeroRect] autorelease];
+    self.list.drawsBackground = NO;
+    self.list.hasVerticalScroller = YES;
+    self.list.autohidesScrollers = YES;
+    self.table = [[[NSTableView alloc] initWithFrame:NSZeroRect] autorelease];
+    self.table.headerView = nil;
+    self.table.style = NSTableViewStylePlain;
+    self.table.rowHeight = menuRowHeight;
+    self.table.intercellSpacing = NSZeroSize;
+    self.table.backgroundColor = NSColor.clearColor;
+    self.table.selectionHighlightStyle = NSTableViewSelectionHighlightStyleNone;
+    self.table.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    self.table.autoresizingMask = NSViewWidthSizable;
+    [self.table addTableColumn:[[[NSTableColumn alloc] initWithIdentifier:@"bookmark"] autorelease]];
+    self.table.dataSource = self;
+    self.table.delegate = self;
+    self.list.documentView = self.table;
+    [self addSubview:self.list];
+    self.status = label(@"", [NSFont systemFontOfSize:13], NSColor.secondaryLabelColor);
+    [self addSubview:self.status];
+    self.feedback = [NSMutableDictionary dictionary];
+    self.focus = -1;
+    NSTrackingArea *tracking = [[[NSTrackingArea alloc] initWithRect:NSZeroRect
+        options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+        owner:self userInfo:nil] autorelease];
+    [self addTrackingArea:tracking];
+    return self;
+}
+
+- (void)mouseExited:(NSEvent *)event { [self.owner scheduleBookmarkClose:nil]; }
+
+- (void)reset {
+    self.search.stringValue = @"";
+    [self.feedback removeAllObjects];
+    [self displayRows:@[] message:@"Loading bookmarks..."];
+}
+
+- (void)displayRows:(NSArray *)rows message:(NSString *)message {
+    self.rows = rows;
+    self.message = message;
+    [self filter];
+}
+
+- (void)filter {
+    NSString *query = self.search.stringValue;
+    NSArray *keys = @[@"name", @"context", @"namespace", @"service", @"port_name"];
+    self.visibleRows = [self.rows filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *row, NSDictionary *bindings) {
+        if (!query.length) return YES;
+        for (NSString *key in keys) {
+            if ([row[key] localizedCaseInsensitiveContainsString:query]) return YES;
+        }
+        NSString *contextLabel = [[row[@"label"] componentsSeparatedByString:@"."] lastObject];
+        return [contextLabel localizedCaseInsensitiveContainsString:query];
+    }]];
+    self.focus = -1;
+    [self.table reloadData];
+    self.status.hidden = self.visibleRows.count != 0;
+    self.status.stringValue = self.message ?: (self.rows.count ? @"No matching bookmarks" : @"No bookmarked services");
+    self.status.toolTip = self.status.stringValue;
+    if (self.visibleRows.count) [self.table scrollRowToVisible:0];
+    [self setNeedsLayout:YES];
+    [self.owner layoutBookmarks];
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)table { return self.visibleRows.count; }
+- (BOOL)tableView:(NSTableView *)table shouldSelectRow:(NSInteger)row { return NO; }
+
+- (NSView *)tableView:(NSTableView *)table viewForTableColumn:(NSTableColumn *)column row:(NSInteger)position {
+    KuriPopoverButton *button = [table makeViewWithIdentifier:column.identifier owner:self];
+    if (!button) {
+        button = rowButton(@"", self, @selector(copyBookmark:), KuriPopoverButton.class);
+        button.identifier = column.identifier;
+    }
+    NSDictionary *row = self.visibleRows[position];
+    button.hovered = NO;
+    button.submenuOpen = position == self.focus;
+    button.secondaryTitle = [NSString stringWithFormat:@"(%@)", row[@"label"]];
+    button.enabled = [row[@"url"] length] > 0;
+    button.toolTip = row[@"url"] ?: row[@"unavailable"];
+    [self renderRow:row button:button];
+    return button;
+}
+
+- (void)renderRow:(NSDictionary *)row button:(KuriPopoverButton *)button {
+    NSString *name = row[@"name"], *secondary = button.secondaryTitle;
+    NSString *title = name.length ? [NSString stringWithFormat:@"%@ %@", name, secondary] : secondary;
+    [button setAccessibilityLabel:title];
+    [button setRowTitle:self.feedback[row[@"id"]] ? @"Copied" : title];
+}
+
+- (void)refreshVisibleRow:(NSInteger)position {
+    if (position < 0 || position >= (NSInteger)self.visibleRows.count) return;
+    KuriPopoverButton *button = [self.table viewAtColumn:0 row:position makeIfNecessary:NO];
+    if (!button) return;
+    button.submenuOpen = position == self.focus;
+    [self renderRow:self.visibleRows[position] button:button];
+}
+
+- (CGFloat)desiredHeight {
+    return bookmarkListTop + recentInset + menuRowHeight * MAX(1, MIN(self.visibleRows.count, 10));
+}
+
+- (void)layout {
+    [super layout];
+    CGFloat w = MAX(0, NSWidth(self.bounds) - 2 * recentInset);
+    self.search.frame = NSMakeRect(recentInset, 8, w, 24);
+    self.separator.frame = NSMakeRect(recentInset, 36, w, 1);
+    self.list.frame = NSMakeRect(recentInset, bookmarkListTop, w, MAX(0, NSHeight(self.bounds) - bookmarkListTop - recentInset));
+    self.status.frame = NSMakeRect(recentInset + 6, bookmarkListTop, MAX(0, w - 12), menuRowHeight);
+    self.list.hidden = self.status.hidden == NO;
+}
+
+- (void)controlTextDidChange:(NSNotification *)note { [self filter]; }
+
+- (void)moveFocus:(NSInteger)step {
+    NSInteger index = self.focus;
+    if (index < 0 && step < 0) index = self.visibleRows.count;
+    for (NSInteger next = index + step; next >= 0 && next < (NSInteger)self.visibleRows.count; next += step) {
+        if (![self.visibleRows[next][@"url"] length]) continue;
+        NSInteger previous = self.focus;
+        self.focus = next;
+        [self.table scrollRowToVisible:next];
+        [self refreshVisibleRow:previous];
+        [self refreshVisibleRow:next];
+        return;
+    }
+}
+
+- (BOOL)handleKey:(NSEvent *)event {
+    if (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption)) return NO;
+    if ([(NSTextView *)self.search.currentEditor hasMarkedText]) return NO;
+    if (event.keyCode == 125 || event.keyCode == 126) {
+        [self moveFocus:event.keyCode == 126 ? -1 : 1];
+        return YES;
+    }
+    if ((event.keyCode == 36 || event.keyCode == 76) && self.focus >= 0) {
+        [self copyRow:self.focus pasteboard:NSPasteboard.generalPasteboard];
+        return YES;
+    }
+    return NO;
+}
+
+- (void)copyBookmark:(KuriPopoverButton *)button {
+    [self copyRow:[self.table rowForView:button] pasteboard:NSPasteboard.generalPasteboard];
+}
+
+- (void)copyRow:(NSInteger)position pasteboard:(NSPasteboard *)pasteboard {
+    if (position < 0 || position >= (NSInteger)self.visibleRows.count) return;
+    NSDictionary *row = self.visibleRows[position];
+    if (!copyServiceURL(row[@"url"], pasteboard)) return;
+    NSString *key = row[@"id"];
+    NSUUID *token = NSUUID.UUID;
+    self.feedback[key] = token;
+    [self refreshVisibleRow:position];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (self.feedback[key] != token) return;
+        [self.feedback removeObjectForKey:key];
+        [self.visibleRows enumerateObjectsUsingBlock:^(NSDictionary *item, NSUInteger index, BOOL *stop) {
+            if ([item[@"id"] isEqualToString:key]) {
+                [self refreshVisibleRow:index];
+                *stop = YES;
+            }
+        }];
+    });
+}
+
+- (void)dealloc {
+    self.search.delegate = nil;
+    self.table.dataSource = nil;
+    self.table.delegate = nil;
+    [_search release];
+    [_separator release];
+    [_list release];
+    [_table release];
+    [_status release];
+    [_rows release];
+    [_visibleRows release];
+    [_feedback release];
+    [_message release];
+    [super dealloc];
+}
+@end
+
 @implementation KuriPopover
 - (void)loadView {
     self.view = [[[KuriPopoverCanvas alloc] initWithFrame:NSMakeRect(0, 0, width, 146)] autorelease];
@@ -232,6 +505,14 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.problem = label(@"", [NSFont systemFontOfSize:12], [NSColor systemRedColor]);
     self.quitLine = line();
     self.quitSeparator = line();
+    self.bookmarkButton = (KuriRecentMenuButton *)rowButton(@"Bookmarked Services", self,
+        @selector(focusBookmarks:), KuriRecentMenuButton.class);
+    self.bookmarkButton.hoverAction = @selector(showBookmarks:);
+    self.bookmarkButton.leaveAction = @selector(scheduleBookmarkClose:);
+    self.bookmarkArrow = [KuriShortcutLabel labelWithString:@"\u203a"];
+    self.bookmarkArrow.font = [NSFont systemFontOfSize:18];
+    self.bookmarkArrow.textColor = secondary;
+    self.bookmarkArrow.alignment = NSTextAlignmentRight;
     self.recentButton = rowButton(@"Recent Services", self, @selector(toggleRecent:), KuriRecentMenuButton.class);
     self.recentButton.hoverAction = @selector(showRecent:);
     self.recentButton.leaveAction = @selector(scheduleRecentClose:);
@@ -249,7 +530,7 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.shortcut.font = regular;
     self.shortcut.textColor = secondary;
     self.shortcut.alignment = NSTextAlignmentRight;
-    for (NSView *view in @[self.headerLine, self.uptime, self.count, self.rowsLine,
+    for (NSView *view in @[self.headerLine, self.uptime, self.count, self.rowsLine, self.bookmarkButton, self.bookmarkArrow,
                            self.recentButton, self.recentArrow, self.problem, self.quitLine,
                            self.settingsButton, self.settingsShortcut, self.quitSeparator, self.quitButton, self.shortcut]) {
         [self.view addSubview:view];
@@ -257,6 +538,8 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.rowButtons = [NSMutableDictionary dictionary];
     self.feedback = [NSMutableDictionary dictionary];
     self.recentFocus = -1;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bookmarkListChanged:)
+        name:KuriBookmarksDidChange object:nil];
 }
 
 - (void)toggleAt:(NSStatusBarButton *)button {
@@ -277,6 +560,7 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
 
 - (void)close {
     [self closeRecent];
+    [self closeBookmarks];
     [self.popover close];
 }
 
@@ -290,7 +574,8 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown |
         NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent *(NSEvent *event) {
         if (event.type == NSEventTypeKeyDown) return [self handleKey:event];
-        if (event.window != self.view.window && event.window != self.recentPanel && event.window != self.anchor.window)
+        if (event.window != self.view.window && event.window != self.recentPanel &&
+            event.window != self.bookmarkPanel && event.window != self.anchor.window)
             [self close];
         return event;
     }];
@@ -303,6 +588,7 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
 
 - (void)popoverDidClose:(NSNotification *)notification {
     [self closeRecent];
+    [self closeBookmarks];
     if (self.keyMonitor) {
         [NSEvent removeMonitor:self.keyMonitor];
         self.keyMonitor = nil;
@@ -364,9 +650,13 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.recentAvailable = known && [view[@"recent_available"] boolValue];
     self.recentEnabled = known && !quitting;
     self.recentButton.enabled = self.recentEnabled;
+    self.bookmarkButton.enabled = !quitting;
     if (![self.rows isEqualToArray:next]) [self rebuildRows:next];
     self.rowsLine.frame = NSMakeRect(padding, y, width - 2 * padding, 1);
     y += 5;
+    self.bookmarkButton.frame = NSMakeRect(padding, y, width - 2 * padding, menuRowHeight);
+    self.bookmarkArrow.frame = NSMakeRect(width - 36, y - 2, 15, menuRowHeight);
+    y += menuRowHeight;
     self.recentButton.frame = NSMakeRect(padding, y, width - 2 * padding, menuRowHeight);
     self.recentArrow.frame = NSMakeRect(width - 36, y - 2, 15, menuRowHeight);
     y += menuRowHeight + 3;
@@ -401,6 +691,10 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
         if (!self.recentEnabled) [self closeRecent];
         else [self layoutRecent];
     }
+    if (self.bookmarkPanel.isVisible) {
+        if (quitting) [self closeBookmarks];
+        else [self layoutBookmarks];
+    }
 }
 
 - (void)rebuildRows:(NSArray *)rows {
@@ -433,21 +727,10 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
 
 - (void)showRecent:(id)sender {
     if (!self.popover.isShown || !self.recentEnabled) return;
+    [self closeBookmarks];
     if (!self.recentPanel) {
-        self.recentPanel = [[[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 280, 40)
-            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-            backing:NSBackingStoreBuffered defer:NO] autorelease];
-        self.recentPanel.releasedWhenClosed = NO;
-        self.recentPanel.hasShadow = YES;
-        self.recentPanel.opaque = NO;
-        self.recentPanel.backgroundColor = NSColor.clearColor;
-        NSVisualEffectView *surface = [[[NSVisualEffectView alloc] initWithFrame:self.recentPanel.contentView.bounds] autorelease];
-        surface.material = NSVisualEffectMaterialMenu;
-        surface.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-        surface.state = NSVisualEffectStateActive;
-        surface.maskImage = recentMenuMask();
-        self.recentPanel.contentView = surface;
-
+        self.recentPanel = serviceMenuPanel(NSPanel.class);
+        NSView *surface = self.recentPanel.contentView;
         self.recentContent = [[[KuriRecentMenuCanvas alloc] initWithFrame:surface.bounds] autorelease];
         self.recentContent.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [surface addSubview:self.recentContent];
@@ -470,24 +753,20 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.recentArrow.textColor = NSColor.selectedMenuItemTextColor;
 }
 
-- (NSRect)recentAnchorRect {
-    NSRect frame = [self.recentButton convertRect:self.recentButton.bounds toView:nil];
+- (NSRect)anchorRectForButton:(NSButton *)button {
+    NSRect frame = [button convertRect:button.bounds toView:nil];
     return [self.view.window convertRectToScreen:frame];
 }
 
+- (NSRect)recentAnchorRect { return [self anchorRectForButton:self.recentButton]; }
+
 - (void)layoutRecent {
-    NSRect parent = self.view.window.frame;
-    NSRect anchor = [self recentAnchorRect];
     NSScreen *screen = self.view.window.screen ?: NSScreen.mainScreen;
     if (!screen) return;
-    NSRect usable = screen.visibleFrame;
-    CGFloat paneWidth = MIN(310, NSWidth(usable));
     CGFloat height = 2 * recentInset + menuRowHeight * MAX(1, self.rows.count);
-    CGFloat x = NSMaxX(parent) + 3;
-    if (x + paneWidth > NSMaxX(usable)) x = NSMinX(parent) - paneWidth - 3;
-    x = MAX(NSMinX(usable), MIN(x, NSMaxX(usable) - paneWidth));
-    CGFloat y = MAX(NSMinY(usable), MIN(NSMaxY(anchor) + recentInset - height, NSMaxY(usable) - height));
-    [self.recentPanel setFrame:NSMakeRect(x, y, paneWidth, height) display:YES];
+    NSRect frame = kuriServiceMenuFrame(self.view.window.frame, [self recentAnchorRect], screen.visibleFrame, NSMakeSize(310, height));
+    [self.recentPanel setFrame:frame display:YES];
+    CGFloat paneWidth = NSWidth(frame);
     self.emptyRecent.stringValue = self.recentAvailable ? @"No recent services" : @"Recent activity unavailable";
     self.emptyRecent.frame = NSMakeRect(recentInset, recentInset, paneWidth - 2 * recentInset, menuRowHeight);
     self.emptyRecent.hidden = self.rows.count != 0;
@@ -544,7 +823,8 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
 }
 
 - (NSEvent *)handleKey:(NSEvent *)event {
-    if (!self.popover.isShown || (event.window != self.view.window && event.window != self.recentPanel)) return event;
+    if (!self.popover.isShown || (event.window != self.view.window && event.window != self.recentPanel &&
+        event.window != self.bookmarkPanel)) return event;
     if (kuriCommandKey(event, KuriKeyQ, @"q")) { [self quit:nil]; return nil; }
     NSEventModifierFlags keys = NSEventModifierFlagCommand | NSEventModifierFlagShift |
         NSEventModifierFlagOption | NSEventModifierFlagControl;
@@ -554,8 +834,18 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
         return event;
     }
     if (event.keyCode == 53) {
-        if (self.recentPanel.isVisible) [self closeRecent];
+        if (self.bookmarkPanel.isVisible) {
+            if ([(NSTextView *)self.bookmarkMenu.search.currentEditor hasMarkedText]) return event;
+            [self closeBookmarks];
+            [self.view.window makeFirstResponder:self.bookmarkButton];
+        } else if (self.recentPanel.isVisible) [self closeRecent];
         else [self close];
+        return nil;
+    }
+    if (event.window == self.bookmarkPanel) return [self.bookmarkMenu handleKey:event] ? nil : event;
+    if (self.view.window.firstResponder == self.bookmarkButton &&
+        (event.keyCode == 124 || event.keyCode == 125 || event.keyCode == 36 || event.keyCode == 76)) {
+        [self focusBookmarks:nil];
         return nil;
     }
     if (self.recentPanel.isVisible || self.view.window.firstResponder == self.recentButton) {
@@ -586,9 +876,7 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
 - (void)copyForward:(KuriPopoverButton *)sender {
     for (NSDictionary *row in self.rows) {
         if (![row[@"id"] isEqualToString:sender.identifier] || ![row[@"url"] length]) continue;
-        NSPasteboard *clipboard = [NSPasteboard generalPasteboard];
-        [clipboard clearContents];
-        if (![clipboard setString:row[@"url"] forType:NSPasteboardTypeString]) return;
+        if (!copyServiceURL(row[@"url"], NSPasteboard.generalPasteboard)) return;
         NSString *key = sender.identifier;
         NSString *token = [[NSUUID UUID] UUIDString];
         self.feedback[key] = token;
@@ -602,6 +890,78 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
         });
         return;
     }
+}
+
+- (void)showBookmarks:(id)sender {
+    if (!self.popover.isShown || !self.bookmarkButton.enabled || self.bookmarkPanel.isVisible) return;
+    [self closeRecent];
+    if (!self.bookmarkPanel) {
+        self.bookmarkPanel = serviceMenuPanel(KuriBookmarkPanel.class);
+        self.bookmarkMenu = [[[KuriBookmarkMenuView alloc] initWithFrame:self.bookmarkPanel.contentView.bounds] autorelease];
+        self.bookmarkMenu.owner = self;
+        [self.bookmarkPanel.contentView addSubview:self.bookmarkMenu];
+    }
+    [self.bookmarkMenu reset];
+    [self layoutBookmarks];
+    [self.view.window addChildWindow:self.bookmarkPanel ordered:NSWindowAbove];
+    [self.bookmarkPanel orderFront:nil];
+    self.bookmarkButton.submenuOpen = YES;
+    [self.bookmarkButton setRowTitle:self.bookmarkButton.title];
+    self.bookmarkArrow.textColor = NSColor.selectedMenuItemTextColor;
+    [self reloadBookmarks];
+}
+
+- (void)focusBookmarks:(id)sender {
+    [self showBookmarks:sender];
+    if (!self.bookmarkPanel.isVisible) return;
+    [self.bookmarkPanel makeKeyWindow];
+    [self.bookmarkPanel makeFirstResponder:self.bookmarkMenu.search];
+}
+
+- (void)layoutBookmarks {
+    NSScreen *screen = self.view.window.screen ?: NSScreen.mainScreen;
+    if (!screen) return;
+    NSRect anchor = [self anchorRectForButton:self.bookmarkButton];
+    NSRect frame = kuriServiceMenuFrame(self.view.window.frame, anchor, screen.visibleFrame,
+        NSMakeSize(340, self.bookmarkMenu.desiredHeight));
+    if (!NSEqualRects(frame, self.bookmarkPanel.frame)) [self.bookmarkPanel setFrame:frame display:YES];
+}
+
+- (void)reloadBookmarks {
+    NSUInteger request = ++self.bookmarkRequest;
+    kuriRequestBookmarks(@{@"operation": @"menu"}, ^(NSDictionary *response) {
+        if (request != self.bookmarkRequest || !self.bookmarkPanel.isVisible) return;
+        NSArray *rows = [response[@"rows"] isKindOfClass:NSArray.class] ? response[@"rows"] : @[];
+        [self.bookmarkMenu displayRows:rows message:response[@"error"]];
+    });
+}
+
+- (void)bookmarkListChanged:(NSNotification *)notification {
+    if (self.bookmarkPanel.isVisible) [self reloadBookmarks];
+}
+
+- (void)closeBookmarks {
+    if (!self.bookmarkPanel.isVisible) return;
+    ++self.bookmarkRequest;
+    BOOL wasKey = self.bookmarkPanel.isKeyWindow;
+    [self.bookmarkPanel makeFirstResponder:nil];
+    [self.bookmarkPanel.parentWindow removeChildWindow:self.bookmarkPanel];
+    [self.bookmarkPanel orderOut:nil];
+    if (wasKey && self.popover.isShown) [self.view.window makeKeyWindow];
+    self.bookmarkButton.hovered = NO;
+    self.bookmarkButton.submenuOpen = NO;
+    [self.bookmarkButton setRowTitle:self.bookmarkButton.title];
+    self.bookmarkArrow.textColor = NSColor.secondaryLabelColor;
+}
+
+- (void)scheduleBookmarkClose:(id)sender {
+    NSUInteger request = self.bookmarkRequest;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 160 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (request != self.bookmarkRequest || !self.bookmarkPanel.isVisible || self.bookmarkMenu.search.currentEditor) return;
+        NSPoint pointer = NSEvent.mouseLocation;
+        if (!NSPointInRect(pointer, [self anchorRectForButton:self.bookmarkButton]) &&
+            !NSPointInRect(pointer, self.bookmarkPanel.frame)) [self closeBookmarks];
+    });
 }
 
 - (void)toggleServer:(NSSwitch *)sender {

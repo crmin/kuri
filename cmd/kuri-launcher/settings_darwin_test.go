@@ -28,12 +28,15 @@ func settingsFixtureOutput(t *testing.T, args ...string) []byte {
 		t.Fatal(err)
 	}
 	fixture := filepath.Join(dir, "settings_payload")
-	command := exec.CommandContext(t.Context(), "xcrun", "clang", "-framework", "AppKit", "-framework", "ServiceManagement", "-framework", "UniformTypeIdentifiers", "-I", ".", source, "settings_darwin.m", "statusitem_darwin.m", "popover_darwin.m", "-o", fixture)
+	command := exec.CommandContext(t.Context(), "xcrun", "clang", "-framework", "AppKit", "-framework", "ServiceManagement", "-framework", "UniformTypeIdentifiers", "-I", ".", source, "settings_darwin.m", "statusitem_darwin.m", "popover_darwin.m", "bookmarks_darwin.m", "-o", fixture)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("compile settings fixture: %v\n%s", err, output)
 	}
 	output, err := exec.CommandContext(t.Context(), fixture, args...).Output()
 	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("run settings fixture: %v\n%s", err, exit.Stderr)
+		}
 		t.Fatalf("run settings fixture: %v", err)
 	}
 	return output
@@ -64,8 +67,26 @@ func TestMenuKeyboardShortcuts(t *testing.T) {
 }
 
 func TestSettingsTabsAndAbout(t *testing.T) {
-	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "tabs"))); got != "General Network About" {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "tabs"))); got != "General Bookmark Network About" {
 		t.Fatalf("settings tabs: %q", got)
+	}
+}
+
+func TestBookmarkSettingsTable(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "bookmark-table"))); got != "ok" {
+		t.Fatalf("bookmark table: %q", got)
+	}
+}
+
+func TestAddBookmarkDialog(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "bookmark-editor"))); got != "ok" {
+		t.Fatalf("bookmark editor: %q", got)
+	}
+}
+
+func TestBookmarkedServicesPopover(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "bookmark-menu"))); got != "ok" {
+		t.Fatalf("bookmark menu: %q", got)
 	}
 }
 

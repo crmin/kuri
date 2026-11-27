@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -352,12 +353,16 @@ func (s Store) ExportTransfer(path string, fields []TransferField) error {
 		return errors.New("Choose an accessible folder for the exported settings file.")
 	}
 	target := filepath.Join(parent, filepath.Base(path))
-	activeParent, _ := filepath.EvalSymlinks(s.Directory())
-	active, activeErr := os.Stat(s.Path())
+	directory, directoryErr := os.Stat(s.Directory())
+	exportDirectory, exportErr := os.Stat(parent)
+	inSettingsDirectory := directoryErr == nil && exportErr == nil && os.SameFile(directory, exportDirectory)
 	chosen, chosenErr := os.Stat(target)
-	if filepath.Clean(path) == s.Path() || (activeParent != "" && target == filepath.Join(activeParent, filepath.Base(s.Path()))) ||
-		(activeErr == nil && chosenErr == nil && os.SameFile(active, chosen)) {
-		return errors.New("Choose a different file. kuri is using this settings file.")
+	for _, activePath := range []string{s.Path(), s.bookmarksPath()} {
+		active, activeErr := os.Stat(activePath)
+		if (inSettingsDirectory && strings.EqualFold(filepath.Base(target), filepath.Base(activePath))) ||
+			(activeErr == nil && chosenErr == nil && os.SameFile(active, chosen)) {
+			return errors.New("Choose a different file. kuri is using this settings file.")
+		}
 	}
 	cfg, err := s.Read()
 	if err != nil {

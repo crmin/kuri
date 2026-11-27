@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crmin/kuri/internal/forward"
+	"github.com/crmin/kuri/internal/route"
 	"github.com/crmin/kuri/internal/settings"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/portforward"
@@ -74,13 +76,22 @@ contexts:
 			t.Error(err)
 		}
 	}()
-	request := func(alias string) {
+	request := func(cfg settings.Config, portName string) {
 		t.Helper()
+		kube, _, err := forward.LoadKubernetes(cfg.Kubernetes.ConfigPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes := kube.Routes(cfg.Server, cfg.Kubernetes.ExcludedContexts, cfg.Kubernetes.Aliases())
+		_, authority := routes.BookmarkAddress(route.Target{Context: "aws-dev", Namespace: "default", Service: "api"}, portName)
+		if authority == "" {
+			t.Fatal("bookmark did not yield a host")
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String()+"/", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Host = "api.default." + alias + ".kuri.localhost"
+		req.Host = authority
 		response, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -101,8 +112,9 @@ contexts:
 			return nil
 		}
 	}
-	request("first")
+	request(cfg, "")
 	first := awaitConnection()
+	request(cfg, "http")
 	_, next, err := store.Update(ctx, func(c *settings.Config) error {
 		c.Kubernetes.MergeAliases(map[string]string{"aws-dev": "second"})
 		return nil
@@ -113,7 +125,7 @@ contexts:
 	if _, err := app.ApplySettings(ctx, state, next.Fingerprint(), false, state.KubeconfigFingerprint); err != nil {
 		t.Fatal(err)
 	}
-	request("second")
+	request(next, "")
 	for host := ""; host != "api.default.second.kuri.localhost"; {
 		select {
 		case host = <-probes:
@@ -130,7 +142,7 @@ contexts:
 		t.Fatal(err)
 	}
 	_ = awaitConnection()
-	request("second")
+	request(next, "http")
 }
 
 func kubernetesPortForwardFixture(t *testing.T, started chan<- httpstream.Connection, probes chan<- string) *httptest.Server {
