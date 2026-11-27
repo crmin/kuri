@@ -25,11 +25,11 @@ const (
 )
 
 var (
-	ErrPortInUse      = errors.New("local port is in use")
-	errClosed         = errors.New("port forwarding is shutting down")
-	errExpired        = errors.New("port forward expired")
-	errEvicted        = errors.New("port forward was evicted to free a local port")
-	errDefaultChanged = errors.New("the default service port changed")
+	ErrPortInUse    = errors.New("local port is in use")
+	errClosed       = errors.New("port forwarding is shutting down")
+	errExpired      = errors.New("port forward expired")
+	errEvicted      = errors.New("port forward was evicted to free a local port")
+	errRouteChanged = errors.New("the service port routing changed")
 )
 
 type Destination struct {
@@ -110,12 +110,13 @@ type entry struct {
 	// Protected by Manager.mu.
 	changed    chan struct{}
 	deadline   time.Time
+	candidates []Destination // While opening or recovering, before a lease is available.
 	lease      *Lease
 	err        error
 	lastAccess time.Time
 	opened     time.Time
 	users      int
-	retired    bool
+	retireErr  error
 }
 
 func NewManager(backend Backend) *Manager {
@@ -157,7 +158,7 @@ func (m *Manager) Acquire(ctx context.Context, request route.Request) (*Lease, e
 func (m *Manager) AcquireRequest(ctx context.Context, request route.Request) (*Lease, func(), error) {
 	for {
 		lease, release, err := m.acquireRequest(ctx, request)
-		if err != errDefaultChanged {
+		if err != errRouteChanged {
 			return lease, release, err
 		}
 	}
@@ -256,11 +257,16 @@ func (m *Manager) load(req route.Request, pending *lookup) {
 	selected := destinations[0]
 	key := route.ResolvedSelector(selected.Target, selected.PortName)
 	e := m.entries[key]
+	if e != nil && e.portsChanged(destinations) {
+		m.retireLocked(e, errRouteChanged)
+		e = nil
+	}
 	if !m.useLocked(e) {
 		entryContext, cancelEntry := context.WithCancel(m.ctx)
 		e = &entry{
 			owner: m, key: key, host: req.Host, ctx: entryContext, cancel: cancelEntry,
 			finished: make(chan struct{}), changed: make(chan struct{}), wake: make(chan struct{}, 1),
+			candidates: destinations,
 		}
 		m.entries[key] = e
 		m.workers.Go(func() { m.run(e, destinations) })
@@ -269,24 +275,57 @@ func (m *Manager) load(req route.Request, pending *lookup) {
 	pending.entry = e
 }
 
+// Compare resolved Pod ports by UID so a change in candidate order alone does
+// not replace a working tunnel. Hold Manager.mu.
+func (e *entry) portsChanged(destinations []Destination) bool {
+	previous := e.candidates
+	if e.lease != nil {
+		previous = []Destination{e.lease.Destination}
+	}
+	if previous[0].Port != destinations[0].Port {
+		return true
+	}
+	if len(previous) == 1 {
+		current := previous[0]
+		return slices.ContainsFunc(destinations, func(dest Destination) bool {
+			return dest.PodUID == current.PodUID && dest.TargetPort != current.TargetPort
+		})
+	}
+	portsByPod := make(map[string]int32, len(previous))
+	for _, dest := range previous {
+		portsByPod[dest.PodUID] = dest.TargetPort
+	}
+	for _, dest := range destinations {
+		if port, ok := portsByPod[dest.PodUID]; ok && port != dest.TargetPort {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) setDefaultLocked(service route.Target, selected route.Selector) {
+	previous := m.defaults[service]
 	if selected.IsDefault() {
 		delete(m.defaults, service)
 	} else {
 		m.defaults[service] = selected
 	}
 	m.updateRecentDefaultLocked(service, selected)
+	if old := m.entries[previous]; previous != selected && old != nil {
+		old.notifyLocked()
+	}
 }
 
 func (m *Manager) await(ctx context.Context, selector route.Selector, e *entry) (*Lease, func(), error) {
 	for {
 		m.mu.Lock()
 		changed, lease, err := e.changed, e.lease, e.err
-		if e.retired && err == nil {
-			err = errExpired
+		if e.retireErr != nil {
+			err = e.retireErr
 		}
-		if err == nil && selector.IsDefault() && m.defaults[selector.ServiceTarget()] != e.key {
-			err = errDefaultChanged
+		if selector.IsDefault() &&
+			(errors.Is(err, errRouteUnavailable) || (err == nil && m.defaults[selector.ServiceTarget()] != e.key)) {
+			err = errRouteChanged
 		}
 		if err == nil && lease != nil && lease.isAlive() {
 			if err = ctx.Err(); err == nil {
@@ -302,7 +341,7 @@ func (m *Manager) await(ctx context.Context, selector route.Selector, e *entry) 
 				m.mu.Lock()
 				defer m.mu.Unlock()
 				e.users--
-				if e.users == 0 && e.retired {
+				if e.users == 0 && e.retireErr != nil {
 					e.cancel()
 				}
 			}), nil
@@ -330,21 +369,17 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 
 	for err == nil {
 		m.mu.Lock()
-		recovered := !e.opened.IsZero()
-		if !recovered {
+		if e.opened.IsZero() {
 			e.opened = lease.Connected
 			e.deadline = e.opened.Add(m.lifetime)
 		}
-		if e.err != nil || e.retired || !m.containsPortLocked(lease.LocalPort) || !time.Now().Before(e.deadline) {
+		if e.err != nil || e.retireErr != nil || !m.containsPortLocked(lease.LocalPort) || !time.Now().Before(e.deadline) {
 			m.mu.Unlock()
 			m.release(e, lease)
 			err = errExpired
 			break
 		}
-		service := e.key.ServiceTarget()
-		if recovered && m.defaults[service] == e.key {
-			m.setDefaultLocked(service, lease.Destination.DefaultPort)
-		}
+		e.candidates = nil
 		e.lease = lease
 		e.notifyLocked()
 		m.ports.mu.Lock()
@@ -355,6 +390,7 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 		recoverable := m.watch(e, lease)
 		m.mu.Lock()
 		e.lease = nil
+		e.candidates = []Destination{lease.Destination}
 		m.mu.Unlock()
 		m.release(e, lease)
 		if !recoverable {
@@ -392,10 +428,12 @@ func (m *Manager) forgetLocked(e *entry) {
 
 func (m *Manager) retireLocked(e *entry, err error) {
 	m.forgetLocked(e)
-	e.retired = true
+	e.retireErr = err
 	e.wakeLocked()
 	if e.users == 0 {
 		m.removeLocked(e, err)
+	} else {
+		e.notifyLocked()
 	}
 }
 
@@ -421,7 +459,7 @@ func (m *Manager) watch(e *entry, lease *Lease) bool {
 	defer timer.Stop()
 	for {
 		m.mu.Lock()
-		expires, retired := e.deadline, e.retired
+		expires, retired := e.deadline, e.retireErr != nil
 		if !retired && !time.Now().Before(expires) {
 			m.retireLocked(e, errExpired)
 			retired = true
@@ -456,7 +494,7 @@ func (m *Manager) watch(e *entry, lease *Lease) bool {
 func (m *Manager) canRecover(e *entry) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return !e.retired && e.ctx.Err() == nil
+	return e.retireErr == nil && e.ctx.Err() == nil
 }
 
 func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
@@ -469,6 +507,20 @@ func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
 		attempt, stopAttempt := context.WithTimeout(ctx, startupTimeout)
 		destinations, err := m.backend.Resolve(attempt, e.key, failed.PodUID)
 		if err == nil && len(destinations) > 0 {
+			m.mu.Lock()
+			if m.entries[e.key] != e {
+				m.mu.Unlock()
+				stopAttempt()
+				cancel()
+				return nil, errExpired
+			}
+			e.candidates = destinations
+			// A different default can be used even if this tunnel cannot reopen.
+			service := e.key.ServiceTarget()
+			if m.defaults[service] == e.key {
+				m.setDefaultLocked(service, destinations[0].DefaultPort)
+			}
+			m.mu.Unlock()
 			var lease *Lease
 			lease, err = m.open(attempt, e, destinations, true, 0)
 			if err == nil {
@@ -613,7 +665,7 @@ func (m *Manager) tryReserve(e *entry, skipped map[int]bool) (int, *entry, <-cha
 			continue
 		}
 		if current := m.ports.owners[port]; current != nil {
-			if current != e && (current.owner != m || current.ephemeral || current.retired || current.lease == nil) {
+			if current != e && (current.owner != m || current.ephemeral || current.retireErr != nil || current.lease == nil) {
 				wait = m.ports.changed
 			}
 			continue

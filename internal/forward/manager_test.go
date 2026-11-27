@@ -234,6 +234,169 @@ func TestWarmNamedRequestReusesDefaultForward(t *testing.T) {
 	}
 }
 
+func TestFreshLookupReplacesChangedNamedForward(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		port, target int32
+	}{
+		{"service port", 3100, 3000},
+		{"pod port", 3000, 3100},
+		{"candidate order", 3000, 3000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			web := namedRequest("api", "web")
+			old := stubDestination(web.Selector, "old")
+			old.Port, old.TargetPort, old.DefaultPort = 3000, 3000, route.Selector{}
+			updated := old
+			updated.Port, updated.TargetPort, updated.DefaultPort = tc.port, tc.target, web.Selector
+			alternate := updated
+			alternate.Pod, alternate.PodUID, alternate.TargetPort = "alternate", "alternate", 3200
+			manager := testManager(stubBackend{resolve: func(_ context.Context, selector route.Selector, _ string) ([]Destination, error) {
+				if selector.IsDefault() {
+					return []Destination{alternate, updated}, nil
+				}
+				return []Destination{old}, nil
+			}})
+			defer manager.Close()
+			first, release, err := manager.AcquireRequest(t.Context(), web)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			got := acquire(t, manager, request("api"))
+			if tc.port == old.Port && tc.target == old.TargetPort {
+				if got != first {
+					t.Fatal("candidate order alone replaced the tunnel")
+				}
+				return
+			}
+			if got == first || got.Destination != alternate || acquire(t, manager, web) != got {
+				t.Fatalf("requests did not switch to the new tunnel: %+v", got.Destination)
+			}
+			if !first.isAlive() {
+				t.Fatal("replacement interrupted an acquired lease")
+			}
+			release()
+			select {
+			case <-first.tunnel.Done:
+			case <-time.After(time.Second):
+				t.Fatal("old tunnel did not close after release")
+			}
+		})
+	}
+}
+
+func TestFreshLookupReplacesOpeningNamedForward(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		web := namedRequest("api", "web")
+		old := stubDestination(web.Selector, "pod")
+		old.DefaultPort = route.Selector{}
+		updated := old
+		updated.TargetPort, updated.DefaultPort = 3100, web.Selector
+		manager := testManager(stubBackend{
+			resolve: func(_ context.Context, selector route.Selector, _ string) ([]Destination, error) {
+				if selector.IsDefault() {
+					return []Destination{updated}, nil
+				}
+				return []Destination{old}, nil
+			},
+			open: func(ctx context.Context, dest Destination, _ int) (Tunnel, error) {
+				if dest == old {
+					<-ctx.Done()
+					return Tunnel{}, ctx.Err()
+				}
+				return stubTunnel(), nil
+			},
+		})
+		defer manager.Close()
+		pending := make(chan *Lease, 1)
+		go func() {
+			lease, _ := manager.Acquire(t.Context(), web)
+			pending <- lease
+		}()
+		synctest.Wait()
+		if len(pending) != 0 {
+			t.Fatal("named request finished before the initial tunnel was open")
+		}
+		fresh := acquire(t, manager, request("api"))
+		if fresh.Destination != updated || <-pending != fresh {
+			t.Fatalf("pending request did not follow the replacement: %+v", fresh.Destination)
+		}
+	})
+}
+
+func TestPendingDefaultRequestUsesNewDefaultDuringFailedRecovery(t *testing.T) {
+	for _, observedBy := range []string{"recovery", "other lookup"} {
+		t.Run(observedBy, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				web, http := namedRequest("api", "web"), namedRequest("api", "http")
+				defaultReq := request("api")
+				firstDone, observe := make(chan struct{}), make(chan struct{})
+				old := stubDestination(web.Selector, "old")
+				old.DefaultPort = web.Selector
+				recovering := stubDestination(web.Selector, "unreachable")
+				recovering.DefaultPort = http.Selector
+				current := stubDestination(http.Selector, "healthy")
+				manager := testManager(stubBackend{
+					resolve: func(ctx context.Context, selector route.Selector, failed string) ([]Destination, error) {
+						if failed != "" {
+							select {
+							case <-observe:
+							case <-ctx.Done():
+								return nil, ctx.Err()
+							}
+							if observedBy == "other lookup" {
+								return nil, errors.New("no eligible web Pod")
+							}
+							return []Destination{recovering}, nil
+						}
+						select {
+						case <-observe:
+							return []Destination{current}, nil
+						default:
+							return []Destination{old}, nil
+						}
+					},
+					open: func(_ context.Context, dest Destination, _ int) (Tunnel, error) {
+						switch dest.Pod {
+						case old.Pod:
+							return Tunnel{Done: firstDone, Close: func() {}}, nil
+						case recovering.Pod:
+							return Tunnel{}, errors.New("web port unreachable")
+						default:
+							return stubTunnel(), nil
+						}
+					},
+				})
+				defer manager.Close()
+				acquire(t, manager, defaultReq)
+				close(firstDone)
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				ready := make(chan error, 1)
+				go func() {
+					lease, err := manager.Acquire(ctx, defaultReq)
+					if err == nil && lease.Destination != current {
+						err = fmt.Errorf("unexpected default: %+v", lease.Destination)
+					}
+					ready <- err
+				}()
+				synctest.Wait()
+				if len(ready) != 0 {
+					t.Fatal("default request did not wait for the mapping to change")
+				}
+				close(observe)
+				if observedBy == "other lookup" {
+					acquire(t, manager, http)
+				}
+				if err := <-ready; err != nil {
+					t.Fatalf("pending default request did not connect to the healthy port: %v", err)
+				}
+			})
+		})
+	}
+}
+
 func TestNamedForwardRecoveryRefreshesPort(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		defaultReq := request("api")
@@ -315,13 +478,20 @@ func TestNamedForwardRecoveryRefreshesPort(t *testing.T) {
 func TestNamedForwardRetiresWhenPortIsRenamed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		web, admin := namedRequest("api", "web"), namedRequest("api", "admin")
-		firstDone := make(chan struct{})
+		firstDone, resume := make(chan struct{}), make(chan struct{})
 		old := stubDestination(web.Selector, "old")
 		old.DefaultPort = web.Selector
 		renamed := stubDestination(admin.Selector, "replacement")
 		renamed.DefaultPort = admin.Selector
 		manager := testManager(stubBackend{
-			resolve: func(_ context.Context, selector route.Selector, failed string) ([]Destination, error) {
+			resolve: func(ctx context.Context, selector route.Selector, failed string) ([]Destination, error) {
+				if failed != "" {
+					select {
+					case <-resume:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
 				select {
 				case <-firstDone:
 					if selector == web.Selector {
@@ -345,9 +515,31 @@ func TestNamedForwardRetiresWhenPortIsRenamed(t *testing.T) {
 		defer manager.Close()
 		acquire(t, manager, web)
 		close(firstDone)
+		namedResult, defaultResult := make(chan error, 1), make(chan error, 1)
+		go func() {
+			_, err := manager.Acquire(t.Context(), web)
+			namedResult <- err
+		}()
+		go func() {
+			lease, err := manager.Acquire(t.Context(), request("api"))
+			if err == nil && lease.Destination != renamed {
+				err = fmt.Errorf("default route used %+v", lease.Destination)
+			}
+			defaultResult <- err
+		}()
 		synctest.Wait()
-		if rows := manager.Snapshot(); len(rows) != 0 {
-			t.Fatalf("removed name is still connected: %+v", rows)
+		if len(namedResult) != 0 || len(defaultResult) != 0 {
+			t.Fatal("requests did not wait for recovery resolution")
+		}
+		close(resume)
+		if err := <-namedResult; !errors.Is(err, errRouteUnavailable) {
+			t.Fatalf("waiting request for the old name did not fail: %v", err)
+		}
+		if err := <-defaultResult; err != nil {
+			t.Fatalf("waiting default request did not follow the rename: %v", err)
+		}
+		if rows := manager.Snapshot(); len(rows) != 1 || rows[0].PortName != "admin" {
+			t.Fatalf("unexpected connections after rename: %+v", rows)
 		}
 		if _, err := manager.Acquire(t.Context(), web); !errors.Is(err, errRouteUnavailable) {
 			t.Fatalf("old name did not fail: %v", err)

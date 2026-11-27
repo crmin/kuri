@@ -116,7 +116,7 @@ From the directory that contains the built binary, you can also use `./kuri`.
 | `admin.our-product.service.prod.kuri.localhost` | 같은 Service에서 이름이 `admin`인 TCP 포트 (예시 번호 8000) |
 | `api.default.kuri.localhost` | kubeconfig의 `current-context`에 있는 `default/api` Service 기본 포트 |
 
-Settings에서 `portName.service.namespace.ctx` 형식을 켜고 `portName` 자리에 Service의 `spec.ports[].name`을 넣습니다. 기존 URL에 포트 번호를 넣었다면 포트 이름으로 바꿉니다. kuri는 선택한 항목의 `targetPort`를 해석해 Pod에 연결합니다.
+Settings에서 `portName.service.namespace.ctx` 형식을 켜고 `portName` 자리에 Service의 `spec.ports[].name`을 넣습니다. 기존 URL에 포트 번호를 넣었다면 포트 이름으로 바꿉니다. kuri는 선택한 항목의 `targetPort`를 해석해 Pod에 연결합니다. Headless Service(`clusterIP: None`)이거나 `targetPort`를 생략한 경우 Service의 `port`를 사용합니다.
 
 포트 이름을 생략하면 Service의 기본 포트에 연결합니다. Service에 포트가 하나면 TCP 포트일 때만 연결합니다. 포트가 여러 개면 이름이 `http`인 TCP 포트를 선택합니다.
 
