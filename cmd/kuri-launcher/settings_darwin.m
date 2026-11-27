@@ -1,10 +1,24 @@
 //go:build cgo
 
 #import "settings_darwin.h"
+#import "shortcuts_darwin.h"
 #import <ServiceManagement/ServiceManagement.h>
 
 extern void kuriGoSettingsRequest(char *edit);
 extern void kuriGoAction(int action);
+
+@interface KuriSettingsWindow : NSWindow
+@end
+
+@implementation KuriSettingsWindow
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    if (self.isKeyWindow && !self.attachedSheet && kuriCommandKey(event, KuriKeyW, @"w")) {
+        [self performClose:nil];
+        return YES;
+    }
+    return [super performKeyEquivalent:event];
+}
+@end
 
 @interface KuriSettingsCanvas : NSView
 @end
@@ -104,7 +118,7 @@ static NSString *settingsString(id value) {
 
 @implementation KuriSettings
 - (instancetype)init {
-    NSWindow *window = [[[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 650, 660)
+    NSWindow *window = [[[KuriSettingsWindow alloc] initWithContentRect:NSMakeRect(0, 0, 650, 660)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
         backing:NSBackingStoreBuffered defer:NO] autorelease];
     self = [super initWithWindow:window];

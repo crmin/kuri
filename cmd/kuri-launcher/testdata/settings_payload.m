@@ -1,4 +1,5 @@
 #import "settings_darwin.h"
+#import "shortcuts_darwin.h"
 #import <ServiceManagement/ServiceManagement.h>
 #import <objc/runtime.h>
 
@@ -30,6 +31,12 @@
 
 static NSString *caseName;
 static BOOL openedLoginItems;
+
+static NSEvent *keyEvent(NSString *characters, unsigned short key, NSEventModifierFlags modifiers) {
+    return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:modifiers
+        timestamp:0 windowNumber:0 context:nil characters:characters charactersIgnoringModifiers:characters
+        isARepeat:NO keyCode:key];
+}
 
 static void captureLoginItemsOpen(id receiver, SEL selector) {
     openedLoginItems = YES;
@@ -66,6 +73,16 @@ static void renderStyleLabels(KuriSettings *settings) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         KuriSettings *settings = [[[KuriSettings alloc] initWithWindow:nil] autorelease];
+        if (argc == 2 && strcmp(argv[1], "shortcuts") == 0) {
+            [NSApplication sharedApplication];
+            if (!kuriCommandKey(keyEvent(@"\u3148", 13, NSEventModifierFlagCommand), 13, @"w")) abort();
+            if (!kuriCommandKey(keyEvent(@"\u3142", 12, NSEventModifierFlagCommand), 12, @"q")) abort();
+            if (!kuriCommandKey(keyEvent(@"w", 8, NSEventModifierFlagCommand), 13, @"w")) abort();
+            if (kuriCommandKey(keyEvent(@"w", 13, NSEventModifierFlagCommand | NSEventModifierFlagShift), 13, @"w")) abort();
+            if (kuriCommandKey(keyEvent(@"w", 13, 0), 13, @"w")) abort();
+            puts("ok");
+            return 0;
+        }
         if (argc == 2 && strcmp(argv[1], "style-labels") == 0) {
             renderStyleLabels(settings);
             return 0;

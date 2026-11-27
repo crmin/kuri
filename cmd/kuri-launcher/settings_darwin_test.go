@@ -51,6 +51,12 @@ func TestLoginItemSettingsRefresh(t *testing.T) {
 	}
 }
 
+func TestSettingsCloseShortcut(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "shortcuts"))); got != "ok" {
+		t.Fatalf("shortcut fixture: %q", got)
+	}
+}
+
 func TestSettingsDomainStyleLabel(t *testing.T) {
 	output := strings.TrimSpace(string(settingsFixtureOutput(t, "style-labels")))
 	lines := strings.Split(output, "\n")
