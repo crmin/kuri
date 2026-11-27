@@ -41,6 +41,12 @@ static KuriStatus *application;
     button.action = @selector(showPopover:);
     self.popover = [[[KuriPopover alloc] init] autorelease];
 
+    [self buildRightMenu];
+    [self applyView:@{}];
+    kuriGoReady();
+}
+
+- (void)buildRightMenu {
     self.rightMenu = [[[NSMenu alloc] initWithTitle:@"Kuri"] autorelease];
     self.rightMenu.delegate = self;
     self.rightMenu.autoenablesItems = NO;
@@ -61,8 +67,6 @@ static KuriStatus *application;
     quit.target = self;
     quit.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     [self.rightMenu addItem:quit];
-    [self applyView:@{}];
-    kuriGoReady();
 }
 
 - (void)applyView:(NSDictionary *)view {

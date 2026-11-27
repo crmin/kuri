@@ -1,4 +1,5 @@
 #import "settings_darwin.h"
+#import "popover_darwin.h"
 #import "shortcuts_darwin.h"
 #import <ServiceManagement/ServiceManagement.h>
 #import <objc/runtime.h>
@@ -17,6 +18,9 @@
 - (void)selectAllTransfer:(id)sender;
 - (void)deselectAllTransfer:(id)sender;
 - (void)closeDialog:(id)sender;
+- (void)openAlias:(NSButton *)sender;
+- (void)saveAlias:(id)sender;
+- (void)selectTab:(NSString *)identifier;
 @end
 
 @interface TransferFixtureSettings : KuriSettings
@@ -24,6 +28,23 @@
 
 @implementation TransferFixtureSettings
 - (void)showDialog {}
+@end
+
+@interface KuriSettingsWindow : NSWindow
+@end
+
+@interface ShortcutFixtureWindow : KuriSettingsWindow
+@property(nonatomic) BOOL closePressed;
+@end
+
+@implementation ShortcutFixtureWindow
+- (BOOL)isKeyWindow { return YES; }
+- (void)performClose:(id)sender { self.closePressed = YES; }
+@end
+
+@interface KuriStatus : NSObject <NSMenuDelegate>
+- (void)buildRightMenu;
+@property(nonatomic, readonly) NSMenu *rightMenu;
 @end
 
 @interface FixtureControl : NSObject
@@ -60,6 +81,8 @@ void kuriGoSettingsRequest(char *edit) {
 }
 
 void kuriGoAction(int action) { abort(); }
+void kuriGoReady(void) { abort(); }
+void kuriGoVisible(int visible) { abort(); }
 
 static FixtureControl *text(NSString *value) {
     FixtureControl *control = [[[FixtureControl alloc] init] autorelease];
@@ -85,6 +108,42 @@ static void renderStyleLabels(KuriSettings *settings) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         KuriSettings *settings = [[[KuriSettings alloc] initWithWindow:nil] autorelease];
+        if (argc == 2 && strcmp(argv[1], "alias-dialog") == 0) {
+            [NSApplication sharedApplication];
+            settings = [[[TransferFixtureSettings alloc] init] autorelease];
+            [settings applyResponse:@{@"kubeconfig_fingerprint": @"fingerprint", @"contexts": @[@"aws-dev"],
+                @"config": @{@"kubernetes": @{@"config_path": @"/tmp/kubeconfig",
+                    @"context_aliases": @{@"/tmp/kubeconfig": @{@"aws-dev": @"previous"}}}}}];
+            NSStackView *contexts = [settings valueForKey:@"contexts"];
+            NSStackView *row = contexts.arrangedSubviews.firstObject;
+            NSStackView *labels = row.arrangedSubviews.firstObject;
+            NSTextField *displayAlias = labels.arrangedSubviews.lastObject;
+            if (![displayAlias.stringValue isEqualToString:@"(previous)"] || ![displayAlias.textColor isEqual:NSColor.secondaryLabelColor]) abort();
+            NSButton *edit = row.arrangedSubviews[1];
+            [settings openAlias:edit];
+            NSWindow *dialog = [settings valueForKey:@"dialog"];
+            NSTextField *input = [settings valueForKey:@"aliasField"];
+            if (![dialog.title isEqualToString:@"aws-dev"] || ![input.stringValue isEqualToString:@"aws-dev"]) abort();
+            [settings closeDialog:nil];
+            [settings openAlias:edit];
+            input = [settings valueForKey:@"aliasField"];
+            input.stringValue = @"dev";
+            caseName = @"save_alias";
+            [settings saveAlias:nil];
+            return 0;
+        }
+        if (argc == 2 && strcmp(argv[1], "auto-healing") == 0) {
+            [NSApplication sharedApplication];
+            settings = [[[TransferFixtureSettings alloc] init] autorelease];
+            [settings applyResponse:@{@"config": @{@"port_forward": @{}}}];
+            NSButton *switchControl = [settings valueForKey:@"autoHealing"];
+            NSTextField *interval = [[settings valueForKey:@"fields"] objectForKey:@"check_seconds"];
+            if (switchControl.state != NSControlStateValueOn || !interval.enabled || ![interval.stringValue isEqualToString:@"10"]) abort();
+            [settings applyResponse:@{@"config": @{@"port_forward": @{@"auto_healing_enabled": @NO, @"connection_check_interval_seconds": @20}}}];
+            if (switchControl.state != NSControlStateValueOff || interval.enabled || ![interval.stringValue isEqualToString:@"20"]) abort();
+            puts("ok");
+            return 0;
+        }
         if (argc == 2 && strcmp(argv[1], "transfer") == 0) {
             [NSApplication sharedApplication];
             settings = [[[TransferFixtureSettings alloc] init] autorelease];
@@ -106,11 +165,23 @@ int main(int argc, char **argv) {
             settings = [[[KuriSettings alloc] init] autorelease];
             NSTabView *tabs = [settings valueForKey:@"tabs"];
             if (tabs.numberOfTabViewItems != 3 || !settings.window.toolbar) abort();
+            for (NSAppearanceName appearance in @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) {
+                settings.window.appearance = [NSAppearance appearanceNamed:appearance];
+                [settings.window setContentSize:NSMakeSize(490, 410)];
+                [settings.window.contentView layoutSubtreeIfNeeded];
+                if (NSWidth(tabs.frame) < 460 || NSHeight(tabs.frame) < 300) abort();
+            }
             NSMutableArray *titles = [NSMutableArray array];
             for (NSTabViewItem *tab in tabs.tabViewItems) {
                 if (![tab.view isKindOfClass:NSScrollView.class]) abort();
                 [titles addObject:tab.label];
             }
+            NSTextField *port = [[settings valueForKey:@"fields"] objectForKey:@"port"];
+            [settings selectTab:@"Network"];
+            port.stringValue = @"38473";
+            [settings selectTab:@"About"];
+            [settings selectTab:@"Network"];
+            if (![port.stringValue isEqualToString:@"38473"] || ![settings.window.toolbar.selectedItemIdentifier isEqualToString:@"Network"]) abort();
             puts([titles componentsJoinedByString:@" "].UTF8String);
             return 0;
         }
@@ -121,6 +192,33 @@ int main(int argc, char **argv) {
             if (!kuriCommandKey(keyEvent(@"w", 8, NSEventModifierFlagCommand), 13, @"w")) abort();
             if (kuriCommandKey(keyEvent(@"w", 13, NSEventModifierFlagCommand | NSEventModifierFlagShift), 13, @"w")) abort();
             if (kuriCommandKey(keyEvent(@"w", 13, 0), 13, @"w")) abort();
+            ShortcutFixtureWindow *window = [[[ShortcutFixtureWindow alloc] initWithContentRect:NSMakeRect(0, 0, 120, 80)
+                styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO] autorelease];
+            for (NSString *characters in @[@"w", @"\u3148", @"\u0446"]) {
+                window.closePressed = NO;
+                if (![window performKeyEquivalent:keyEvent(characters, 13, NSEventModifierFlagCommand)] || !window.closePressed) abort();
+            }
+            puts("ok");
+            return 0;
+        }
+        if (argc == 2 && strcmp(argv[1], "menus") == 0) {
+            [NSApplication sharedApplication];
+            KuriStatus *status = [[[KuriStatus alloc] init] autorelease];
+            [status buildRightMenu];
+            NSArray<NSMenuItem *> *items = status.rightMenu.itemArray;
+            if (items.count < 3 || !items[items.count - 2].isSeparatorItem || ![items.lastObject.title isEqualToString:@"Quit"] ||
+                ![items[items.count - 3].title isEqualToString:@"Settings..."]) abort();
+            for (NSString *characters in @[@"q", @"\u3142", @"\u0439"]) {
+                id target = nil;
+                SEL action = NULL;
+                if (![status menuHasKeyEquivalent:status.rightMenu forEvent:keyEvent(characters, 12, NSEventModifierFlagCommand)
+                    target:&target action:&action] || target != status || action != @selector(quit:)) abort();
+            }
+            KuriPopover *popover = [[[KuriPopover alloc] init] autorelease];
+            [popover applyView:@{@"known": @YES, @"mode": @"stopped"}];
+            NSView *settingsRow = [popover valueForKey:@"settingsButton"], *quitRow = [popover valueForKey:@"quitButton"];
+            NSView *separator = [popover valueForKey:@"quitSeparator"];
+            if (NSMaxY(settingsRow.frame) > NSMinY(separator.frame) || NSMaxY(separator.frame) > NSMinY(quitRow.frame)) abort();
             puts("ok");
             return 0;
         }

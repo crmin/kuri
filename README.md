@@ -126,7 +126,9 @@ Settings에서 `portName.service.namespace.ctx` 형식을 켜고 `portName` 자�
 
 위 예시는 기본 도메인과 수신 포트 80을 사용합니다. Settings에서 프록시가 받을 도메인 형식과 Kubernetes 컨텍스트를 선택합니다. 수신 포트가 80과 다르면 URL 끝에 `:포트번호`를 붙입니다.
 
-컨텍스트 이름이 소문자 DNS 라벨이면 그대로 사용합니다. 그 외에는 이름의 SHA-256 해시를 16진수로 표시한 뒤 앞 16자리를 `ctx-` 뒤에 붙입니다. 아래 명령으로 `dev.cluster`의 별칭을 확인할 수 있습니다.
+컨텍스트에 별칭을 지정하면 호스트의 `ctx` 자리에 별칭을 사용합니다. 별칭이 다른 컨텍스트의 이름과 같으면 별칭 대상에서만 서비스를 찾습니다.
+
+별칭을 지정하지 않은 컨텍스트의 이름이 소문자 DNS 라벨이면 그대로 사용합니다. 그 외에는 이름의 SHA-256 해시를 16진수로 표시한 뒤 앞 16자리를 `ctx-` 뒤에 붙입니다. 아래 명령으로 `dev.cluster`의 별칭을 확인할 수 있습니다.
 
 ```sh
 printf 'ctx-%s\n' "$(printf %s 'dev.cluster' | shasum -a 256 | cut -c1-16)"
@@ -134,6 +136,8 @@ printf 'ctx-%s\n' "$(printf %s 'dev.cluster' | shasum -a 256 | cut -c1-16)"
 
 ## Port forwards and access logs
 
-By default, a port forward stays open for 60 minutes after its latest request. You can instead count from the time it opens or close each forward when its request finishes. The default forwarding range is 30000 through 39999, inclusive. When the range is full, kuri closes the oldest reusable forward to make room. kuri checks kept-alive forwards every 10 seconds with `HEAD /` and tries to reconnect until their expiration.
+By default, a port forward stays open for 60 minutes after its latest request. You can instead count from the time it opens or close each forward when its request finishes. The default forwarding range is 30000 through 39999, inclusive. When the range is full, kuri closes the oldest reusable forward to make room.
+
+Auto Healing은 기본으로 켜져 있습니다. kuri는 10초마다 열린 포트포워딩에 `HEAD /` 요청을 보내 연결을 확인합니다. 재사용 터널이 끊기면 만료 전까지 복구를 시도합니다. Network 설정에서 검사 주기를 바꾸거나 Auto Healing을 끌 수 있습니다.
 
 kuri records request outcomes and server start and stop events in English in `$HOME/.kuri/access.log` using JSON Lines format. Before writing a new entry, kuri removes entries older than 72 hours and trims the file to keep it within 100 MiB. `status` writes only to standard output. If console output is blocked in foreground mode and the queue fills up, kuri drops some console messages and continues writing to the log file. At shutdown, kuri waits up to one second for pending console messages to print. If standard error is available, kuri reports dropped messages or interrupted console output there.
