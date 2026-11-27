@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	_ "embed"
 	"encoding/json"
 	"os"
@@ -12,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/crmin/kuri/internal/settings"
@@ -35,21 +35,36 @@ func TestSettingsEditPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run settings fixture: %v", err)
 	}
-	payloads := bufio.NewScanner(bytes.NewReader(output))
-	check := func(name string, want settings.Edit) {
-		t.Helper()
-		if !payloads.Scan() {
-			t.Fatalf("missing %s payload: %v", name, payloads.Err())
+	payloads := make(map[string]string)
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		name, payload, found := strings.Cut(scanner.Text(), "\t")
+		if !found || name == "" {
+			t.Fatalf("invalid fixture result: %q", scanner.Text())
 		}
+		if _, exists := payloads[name]; exists {
+			t.Fatalf("duplicate fixture case %q", name)
+		}
+		payloads[name] = payload
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read fixture results: %v", err)
+	}
+	check := func(name string, want settings.Edit) {
+		payload, found := payloads[name]
+		delete(payloads, name)
 		t.Run(name, func(t *testing.T) {
+			if !found {
+				t.Fatal("missing fixture result")
+			}
 			var got settings.Edit
-			decoder := json.NewDecoder(bytes.NewReader(payloads.Bytes()))
+			decoder := json.NewDecoder(strings.NewReader(payload))
 			decoder.DisallowUnknownFields()
 			if err := decoder.Decode(&got); err != nil {
-				t.Fatalf("decode %s: %v", payloads.Text(), err)
+				t.Fatalf("decode %s: %v", payload, err)
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Errorf("unexpected payload %s for %+v", payloads.Text(), want)
+				t.Errorf("unexpected payload %s for %+v", payload, want)
 			}
 		})
 	}
@@ -68,7 +83,7 @@ func TestSettingsEditPayloads(t *testing.T) {
 	check("save_forward_without_keep_alive", forward)
 	forward.Minutes = new("60")
 	check("save_forward_with_keep_alive", forward)
-	if payloads.Scan() || payloads.Err() != nil {
-		t.Errorf("unexpected fixture output: %q (%v)", payloads.Text(), payloads.Err())
+	for name := range payloads {
+		t.Errorf("unexpected fixture case %q", name)
 	}
 }

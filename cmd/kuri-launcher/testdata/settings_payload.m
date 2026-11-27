@@ -22,9 +22,11 @@
 }
 @end
 
+static NSString *caseName;
+
 void kuriGoSettingsRequest(char *edit) {
-    if (!edit) abort();
-    puts(edit);
+    if (!caseName || !edit) abort();
+    printf("%s\t%s\n", caseName.UTF8String, edit);
 }
 
 void kuriGoAction(int action) { abort(); }
@@ -42,14 +44,17 @@ int main(void) {
         [settings setValue:@{styles[0]: @YES, styles[1]: @YES, styles[2]: @YES} forKey:@"styles"];
         NSArray<NSString *> *checkboxes = [@[@"register", @"auto_start", @"keep_alive"] arrayByAddingObjectsFromArray:styles];
         FixtureControl *control = [[[FixtureControl alloc] init] autorelease];
-        for (NSNumber *state in @[@(NSControlStateValueOn), @(NSControlStateValueOff)]) {
+        for (NSNumber *state in @[@(NSControlStateValueOff), @(NSControlStateValueOn)]) {
             control.state = state.integerValue;
+            NSString *stateName = control.state == NSControlStateValueOn ? @"true" : @"false";
             for (NSString *identifier in checkboxes) {
                 control.identifier = identifier;
+                caseName = [NSString stringWithFormat:@"%@/%@", identifier, stateName];
                 [settings toggle:(NSButton *)control];
                 [settings setValue:@NO forKey:@"busy"];
             }
             control.identifier = @"dev";
+            caseName = [@"context/" stringByAppendingString:stateName];
             [settings changeContext:(NSSwitch *)control];
             [settings setValue:@NO forKey:@"busy"];
         }
@@ -59,11 +64,15 @@ int main(void) {
                     forKey:@"fields"];
         [settings setValue:@{@"port": @"80"} forKey:@"saved"];
         [settings setValue:control forKey:@"keepAlive"];
+        caseName = @"save_server";
         [settings saveServer:nil];
         [settings setValue:@NO forKey:@"busy"];
+        control.state = NSControlStateValueOff;
+        caseName = @"save_forward_without_keep_alive";
         [settings saveForward:nil];
         [settings setValue:@NO forKey:@"busy"];
         control.state = NSControlStateValueOn;
+        caseName = @"save_forward_with_keep_alive";
         [settings saveForward:nil];
     }
 }
