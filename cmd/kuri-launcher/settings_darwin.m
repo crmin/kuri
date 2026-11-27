@@ -463,8 +463,6 @@ static NSString *settingsString(id value) {
     NSMutableDictionary *draft = [NSMutableDictionary dictionary];
     for (NSString *key in self.fields) {
         NSTextField *field = self.fields[key];
-        if (field == self.fields[@"minutes"] && self.keepAlive.state != NSControlStateValueOn) continue;
-        if (field == self.fields[@"check_seconds"] && self.autoHealing.state != NSControlStateValueOn) continue;
         NSString *text = field.currentEditor ? field.currentEditor.string : field.stringValue;
         if (![text isEqualToString:self.saved[key] ?: @""] || ([key isEqual:@"port"] && self.portDraftUnapplied))
             draft[key] = text;
@@ -516,8 +514,9 @@ static NSString *settingsString(id value) {
         };
         for (NSString *key in self.fields) {
             BOOL restoredPort = [key isEqual:@"port"] && portError.length != 0;
-            BOOL acceptSaved = (saved && pending[key] && !restoredPort) || (reset && applied) ||
-                ([key isEqual:@"minutes"] && self.keepAlive.state == NSControlStateValueOff);
+            BOOL disabledByEdit = ([key isEqual:@"minutes"] && pending[@"keep_alive"] && self.keepAlive.state == NSControlStateValueOff) ||
+                ([key isEqual:@"check_seconds"] && pending[@"auto_healing"] && self.autoHealing.state == NSControlStateValueOff);
+            BOOL acceptSaved = (saved && ((pending[key] && !restoredPort) || disabledByEdit)) || (reset && applied);
             NSString *text = restoredPort && pending[key] ? pending[key] :
                 (!pending || acceptSaved) ? self.saved[key] : draft[key] ?: self.saved[key];
             self.fields[key].stringValue = text ?: @"";
@@ -729,28 +728,32 @@ static NSArray *settingsTransferGroups(void) {
     panel.allowsMultipleSelection = NO;
     panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"yaml"]];
     [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
-        if (result == NSModalResponseOK) [self previewImport:panel.URL.path];
+        if (result == NSModalResponseOK) [self previewImport:panel.URL.path keepingSelection:nil];
     }];
 }
 
-- (void)previewImport:(NSString *)path {
+- (void)previewImport:(NSString *)path keepingSelection:(NSArray *)selection {
     if (!path.length || [path.pathExtension caseInsensitiveCompare:@"yaml"] != NSOrderedSame) {
         [self notice:@"Choose a settings file with the .yaml extension."];
         return;
     }
     self.transferPath = path;
-    [self submit:@{@"transfer_operation": @"preview_import", @"path": path}];
+    NSMutableDictionary *request = [NSMutableDictionary dictionaryWithDictionary:@{@"transfer_operation": @"preview_import", @"path": path}];
+    if (selection) request[@"fields"] = selection;
+    [self submit:request];
 }
 
 - (void)openExport:(id)sender {
     if (self.dialog || self.busy) return;
-    [self openTransferDialog:NO];
+    [self openTransferDialog:NO keepingSelection:nil];
 }
 
-- (void)openTransferDialog:(BOOL)importing {
+- (void)openTransferDialog:(BOOL)importing keepingSelection:(NSArray *)selection {
     NSString *action = importing ? @"Import" : @"Export";
     NSStackView *stack = [self createDialog:[action stringByAppendingString:@" settings"] size:NSMakeSize(445, 575)];
-    [self addDescription:importing ? @"Choose the settings to import from this file." : @"Choose the settings to export to a YAML file." to:stack];
+    NSString *description = importing ? @"Choose the settings to import from this file." : @"Choose the settings to export to a YAML file.";
+    if (selection) description = @"The active kubeconfig changed. Review your selection before importing.";
+    [self addDescription:description to:stack];
     NSArray *fields = self.transferPreview[@"fields"];
     self.transferChoices = [NSMutableDictionary dictionary];
     for (NSArray *group in settingsTransferGroups()) {
@@ -760,7 +763,7 @@ static NSArray *settingsTransferGroups(void) {
             NSArray *item = group[i];
             NSButton *checkbox = [NSButton checkboxWithTitle:item[1] target:self action:@selector(changeTransferSelection:)];
             checkbox.enabled = !importing || [fields containsObject:item[0]];
-            checkbox.state = checkbox.enabled ? NSControlStateValueOn : NSControlStateValueOff;
+            checkbox.state = checkbox.enabled && (!selection || [selection containsObject:item[0]]) ? NSControlStateValueOn : NSControlStateValueOff;
             self.transferChoices[item[0]] = checkbox;
             [choices addArrangedSubview:checkbox];
         }
@@ -868,14 +871,14 @@ static NSArray *settingsTransferGroups(void) {
             [self notice:error];
         } else {
             self.transferPreview = response;
-            [self openTransferDialog:YES];
+            [self openTransferDialog:YES keepingSelection:pending[@"fields"]];
         }
         return;
     }
     if ([response[@"refresh"] boolValue]) {
         NSString *path = [[self.transferPath retain] autorelease];
         [self closeDialog:nil];
-        [self previewImport:path];
+        [self previewImport:path keepingSelection:pending[@"fields"]];
         return;
     }
     if (error.length) {
@@ -1017,7 +1020,9 @@ static NSArray *settingsTransferGroups(void) {
         [self.dialog makeKeyAndOrderFront:nil];
         return;
     }
-    NSDictionary *draft = [self draft];
+    NSMutableDictionary *draft = [[[self draft] mutableCopy] autorelease];
+    if (self.keepAlive.state != NSControlStateValueOn) [draft removeObjectForKey:@"minutes"];
+    if (self.autoHealing.state != NSControlStateValueOn) [draft removeObjectForKey:@"check_seconds"];
     if (!draft.count) {
         [self dismiss:quit];
         return;

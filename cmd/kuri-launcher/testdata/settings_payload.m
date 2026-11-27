@@ -13,7 +13,8 @@
 - (void)saveServer:(id)sender;
 - (void)saveForward:(id)sender;
 - (void)renderStyles:(NSDictionary *)server;
-- (void)openTransferDialog:(BOOL)importing;
+- (void)openTransferDialog:(BOOL)importing keepingSelection:(NSArray *)selection;
+- (void)updateControls;
 - (NSArray *)selectedTransferFields;
 - (void)selectAllTransfer:(id)sender;
 - (void)deselectAllTransfer:(id)sender;
@@ -27,7 +28,7 @@
 @end
 
 @implementation TransferFixtureSettings
-- (void)showDialog {}
+- (void)showDialog { [self updateControls]; }
 @end
 
 @interface KuriSettingsWindow : NSWindow
@@ -147,16 +148,56 @@ int main(int argc, char **argv) {
         if (argc == 2 && strcmp(argv[1], "transfer") == 0) {
             [NSApplication sharedApplication];
             settings = [[[TransferFixtureSettings alloc] init] autorelease];
-            [settings openTransferDialog:NO];
+            [settings openTransferDialog:NO keepingSelection:nil];
             if (settings.selectedTransferFields.count != 10) abort();
             [settings deselectAllTransfer:nil];
             if (settings.selectedTransferFields.count != 0 || [[settings valueForKey:@"transferConfirm"] isEnabled]) abort();
             [settings closeDialog:nil];
             [settings setValue:@{@"fields": @[@"context_aliases", @"port"]} forKey:@"transferPreview"];
-            [settings openTransferDialog:YES];
+            [settings openTransferDialog:YES keepingSelection:nil];
             [settings deselectAllTransfer:nil];
             [settings selectAllTransfer:nil];
             if (![[NSSet setWithArray:settings.selectedTransferFields] isEqual:[NSSet setWithArray:@[@"port", @"context_aliases"]]]) abort();
+            puts("ok");
+            return 0;
+        }
+        if (argc == 2 && strcmp(argv[1], "transfer-refresh") == 0) {
+            [NSApplication sharedApplication];
+            settings = [[[TransferFixtureSettings alloc] init] autorelease];
+            [settings setValue:@"/tmp/import.yaml" forKey:@"transferPath"];
+            [settings setValue:@{@"transfer_operation": @"import", @"fields": @[@"context_aliases"]} forKey:@"pending"];
+            caseName = @"refresh";
+            [settings applyResponse:@{@"refresh": @YES}];
+            NSDictionary *request = [settings valueForKey:@"pending"];
+            if (![request[@"fields"] isEqual:@[@"context_aliases"]]) abort();
+            [settings applyResponse:@{@"fields": @[@"domain", @"port", @"context_aliases"]}];
+            if (![settings.selectedTransferFields isEqual:@[@"context_aliases"]]) abort();
+            [settings closeDialog:nil];
+            [settings setValue:request forKey:@"pending"];
+            [settings applyResponse:@{@"fields": @[@"domain", @"port"]}];
+            if (settings.selectedTransferFields.count || [[settings valueForKey:@"transferConfirm"] isEnabled]) abort();
+            return 0;
+        }
+        if (argc == 2 && strcmp(argv[1], "transfer-draft") == 0) {
+            [NSApplication sharedApplication];
+            settings = [[[TransferFixtureSettings alloc] init] autorelease];
+            NSDictionary *enabled = @{@"saved": @YES, @"config": @{@"port_forward": @{@"keep_alive_enabled": @YES, @"keep_alive_minutes": @60}}};
+            NSDictionary *disabled = @{@"saved": @YES, @"config": @{@"port_forward": @{@"keep_alive_enabled": @NO, @"keep_alive_minutes": @60}}};
+            [settings applyResponse:enabled];
+            NSTextField *minutes = [[settings valueForKey:@"fields"] objectForKey:@"minutes"];
+            minutes.stringValue = @"95";
+            [settings setValue:@{@"transfer_operation": @"import", @"fields": @[@"keep_alive_enabled"]} forKey:@"pending"];
+            [settings applyResponse:@{@"settings": disabled}];
+            if (minutes.enabled || ![minutes.stringValue isEqualToString:@"95"]) abort();
+            [settings setValue:@{@"auto_start": @YES} forKey:@"pending"];
+            [settings applyResponse:disabled];
+            if (![minutes.stringValue isEqualToString:@"95"]) abort();
+            [settings setValue:@{@"keep_alive": @YES} forKey:@"pending"];
+            [settings applyResponse:enabled];
+            if (!minutes.enabled || ![minutes.stringValue isEqualToString:@"95"]) abort();
+            [settings setValue:@{@"keep_alive": @NO} forKey:@"pending"];
+            [settings applyResponse:disabled];
+            if (![minutes.stringValue isEqualToString:@"60"]) abort();
             puts("ok");
             return 0;
         }

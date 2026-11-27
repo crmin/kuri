@@ -75,6 +75,25 @@ func TestSettingsTransferSelection(t *testing.T) {
 	}
 }
 
+func TestImportRefreshPreservesSelection(t *testing.T) {
+	output := strings.TrimSpace(string(settingsFixtureOutput(t, "transfer-refresh")))
+	name, payload, _ := strings.Cut(output, "\t")
+	var request struct {
+		Operation string   `json:"transfer_operation"`
+		Fields    []string `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(payload), &request); name != "refresh" || err != nil ||
+		request.Operation != "preview_import" || len(request.Fields) != 1 || request.Fields[0] != "context_aliases" {
+		t.Fatalf("invalid refresh request: %s", output)
+	}
+}
+
+func TestImportPreservesUnselectedDraft(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "transfer-draft"))); got != "ok" {
+		t.Fatalf("settings transfer draft: %q", got)
+	}
+}
+
 func TestSettingsAliasDialog(t *testing.T) {
 	output := strings.TrimSpace(string(settingsFixtureOutput(t, "alias-dialog")))
 	key, value, ok := strings.Cut(output, "\t")
