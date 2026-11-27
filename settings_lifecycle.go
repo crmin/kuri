@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/crmin/kuri/internal/daemon"
@@ -18,6 +19,7 @@ type settingsServer interface {
 	ApplySettings(context.Context, daemon.State, string, bool) (daemon.State, error)
 	Start(context.Context) (int, error)
 	Stop(context.Context) (int, error)
+	HoldProxyForRegistration(context.Context, func(daemon.State) error) (io.Closer, bool, error)
 	ConfirmPortChange(context.Context, launchd.PortChange) error
 	Registration(context.Context) (launchd.Registration, error)
 	OwnsRegisteredPort(context.Context, int) (bool, error)

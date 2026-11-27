@@ -35,8 +35,12 @@ func loadSettingsView(ctx context.Context, home string, app settingsServer) sett
 	registration, err := launchd.Registered(ctx, home)
 	if err != nil {
 		view.RegistrationError = err.Error()
-	} else {
-		view.ProxyUpdateNeeded = registration.AppStartup || !registration.SupportsProxyPause(ctx)
+	} else if registration.AppStartup || !registration.SupportsProxyPause(ctx) {
+		if registration.CanUpdateFromApp() {
+			view.ProxyUpdateNeeded = true
+		} else {
+			view.RegistrationError = registration.ProxyUpdateError().Error()
+		}
 	}
 	kube, _, err := forward.LoadKubernetes(view.Config.Kubernetes.ConfigPath)
 	if err != nil {

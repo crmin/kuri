@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +22,6 @@ import (
 
 const (
 	registrationPath = "/Library/LaunchDaemons/com.github.crmin.kuri.plist"
-	managedProgram   = Directory + "/kuri"
 	startupLink      = "/usr/local/bin/kuri"
 )
 
@@ -124,7 +124,7 @@ func (r Registration) SupportsProxyPause(ctx context.Context) bool {
 	return r.supports(ctx, "__proxy_pause_version")
 }
 
-func CheckProxyPauseSupport(ctx context.Context, home string) error {
+func CheckProxyPauseSupport(ctx context.Context, home string, running int, probe func(context.Context) bool) error {
 	reg, err := Registered(ctx, home)
 	if errors.Is(err, ErrOtherRegistration) {
 		return nil
@@ -136,14 +136,15 @@ func CheckProxyPauseSupport(ctx context.Context, home string) error {
 	if err != nil {
 		return err
 	}
-	return checkProxyPauseSupport(ctx, reg, loaded)
+	return checkProxyPauseSupport(ctx, reg, loaded, running, probe)
 }
 
-func checkProxyPauseSupport(ctx context.Context, reg Registration, loaded string) error {
+func checkProxyPauseSupport(ctx context.Context, reg Registration, loaded string, running int, probe func(context.Context) bool) error {
 	if loaded == "" {
 		return nil
 	}
 	var path, program string
+	var pid int
 	for line := range strings.SplitSeq(loaded, "\n") {
 		if value, ok := strings.CutPrefix(line, "\tpath = "); ok {
 			path = value
@@ -151,12 +152,20 @@ func checkProxyPauseSupport(ctx context.Context, reg Registration, loaded string
 		if value, ok := strings.CutPrefix(line, "\tprogram = "); ok {
 			program = value
 		}
+		if value, ok := strings.CutPrefix(line, "\tpid = "); ok {
+			pid, _ = strconv.Atoi(value)
+		}
 	}
 	if path != registrationPath || program != reg.Program {
 		return errors.New("The loaded kuri LaunchDaemon differs from its registered configuration.")
 	}
+	// A runtime already visible to Stop will exit before Stop succeeds. An
+	// idle activation process can outlive its replaced executable on disk.
 	if !reg.SupportsProxyPause(ctx) {
-		return errors.New("Update Proxy Registration in kuri Settings before stopping the proxy.")
+		return reg.ProxyUpdateError()
+	}
+	if pid > 0 && pid != running && (probe == nil || !probe(ctx)) {
+		return errors.New("The previous kuri activation process is still active. Wait a moment and try again.")
 	}
 	return nil
 }
@@ -174,19 +183,11 @@ func loadedRegistration(ctx context.Context) (string, error) {
 }
 
 func EnsurePolicySupport(ctx context.Context, home string, stderr io.Writer) error {
-	return ensureProgramSupport(ctx, home, stderr, Registration.SupportsSettings)
-}
-
-func EnsureProxyPauseSupport(ctx context.Context, home string, stderr io.Writer) error {
-	return ensureProgramSupport(ctx, home, stderr, Registration.SupportsProxyPause)
-}
-
-func ensureProgramSupport(ctx context.Context, home string, stderr io.Writer, supports func(Registration, context.Context) bool) error {
 	registration, err := Registered(ctx, home)
 	if err != nil {
 		return err
 	}
-	if supports(registration, ctx) {
+	if registration.SupportsSettings(ctx) {
 		return nil
 	}
 	if registration.Program != managedProgram {
@@ -206,7 +207,7 @@ func ensureProgramSupport(ctx context.Context, home string, stderr io.Writer, su
 	}); err != nil {
 		return err
 	}
-	if !supports(registration, ctx) {
+	if !registration.SupportsSettings(ctx) {
 		return errors.New("Update the installed kuri binary to apply the saved settings.")
 	}
 	return nil

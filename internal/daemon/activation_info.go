@@ -49,6 +49,11 @@ func (app *App) activationInfo(ctx context.Context) (reply, error) {
 	return decodeControlReply(json.NewDecoder(socket))
 }
 
+func (app *App) SupportsLiveProxyPause(ctx context.Context) bool {
+	info, err := app.activationInfo(ctx)
+	return err == nil && info.ProxyPause
+}
+
 func ProbePort(port int) error {
 	listeners, err := bindHTTP(port)
 	if err != nil {

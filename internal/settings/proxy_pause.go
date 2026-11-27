@@ -40,6 +40,26 @@ func (s Store) SetProxyPaused(ctx context.Context, paused bool) error {
 	return s.setProxyPaused(ctx, boot, paused)
 }
 
+// PauseProxyForRefresh suppresses RunAtLoad while an eager job is reloaded.
+// The return value tells the caller whether it owns the new record.
+func (s Store) PauseProxyForRefresh(ctx context.Context) (bool, error) {
+	boot, err := bootSession()
+	if err != nil || boot == "" {
+		return false, err
+	}
+	lock, err := s.lock(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	paused, err := s.proxyPaused(boot)
+	if err != nil || paused {
+		return false, err
+	}
+	err = s.replaceFile(filepath.Join(s.Directory(), proxyPauseFile), []byte(boot))
+	return err == nil, err
+}
+
 func (s Store) setProxyPaused(ctx context.Context, boot string, paused bool) error {
 	lock, err := s.lock(ctx)
 	if err != nil {

@@ -3,11 +3,13 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -86,6 +88,15 @@ func TestQuitRequiresExitOfKnownServerWithNoSocket(t *testing.T) {
 }
 
 func TestStopWaitsForProcessExit(t *testing.T) {
+	testBackgroundExit(t, false)
+}
+
+func TestRegistrationHandoffStopsAndHoldsRuntime(t *testing.T) {
+	testBackgroundExit(t, true)
+}
+
+func testBackgroundExit(t *testing.T, handoff bool) {
+	t.Helper()
 	app := testApp(t)
 	exe, err := os.Executable()
 	if err != nil {
@@ -119,9 +130,30 @@ func TestStopWaitsForProcessExit(t *testing.T) {
 		}
 	}
 	started := time.Now()
-	pid, err := app.Stop(ctx)
-	if err != nil || pid != cmd.Process.Pid {
-		t.Fatalf("stop: pid=%d err=%v", pid, err)
+	if handoff {
+		var seen int
+		guard, stopped, err := app.HoldProxyForRegistration(ctx, func(state State) error {
+			if state.PID != 0 {
+				seen = state.PID
+			}
+			return nil
+		})
+		if err != nil || !stopped || seen != cmd.Process.Pid {
+			t.Fatalf("handoff: seen=%d stopped=%v err=%v", seen, stopped, err)
+		}
+		defer guard.Close()
+		dir := filepath.Join(app.home, ".kuri")
+		if next, err := lockRuntime(dir); !errors.Is(err, ErrAlreadyRunning) {
+			if next != nil {
+				next.Close()
+			}
+			t.Fatalf("a following instance could start during registration update: %v", err)
+		}
+	} else {
+		pid, err := app.Stop(ctx)
+		if err != nil || pid != cmd.Process.Pid {
+			t.Fatalf("stop: pid=%d err=%v", pid, err)
+		}
 	}
 	if time.Since(started) < 150*time.Millisecond {
 		t.Fatal("stop returned before the acknowledged child had exited")

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/crmin/kuri/internal/daemon"
@@ -58,6 +60,9 @@ func (s *testSettingsServer) Start(ctx context.Context) (int, error) {
 func (*testSettingsServer) Stop(context.Context) (int, error) {
 	return 0, errors.New("unexpected Stop")
 }
+func (*testSettingsServer) HoldProxyForRegistration(context.Context, func(daemon.State) error) (io.Closer, bool, error) {
+	return nil, false, errors.New("unexpected registration handoff")
+}
 func (*testSettingsServer) ConfirmPortChange(context.Context, launchd.PortChange) error {
 	return errors.New("unexpected launchd port change")
 }
@@ -77,6 +82,33 @@ func (*testSettingsServer) HandoffDirectForeground(context.Context, daemon.State
 	return errors.New("unexpected direct foreground handoff")
 }
 func (s *testSettingsServer) EnsurePolicySupport(context.Context) error { return s.policyErr }
+
+func TestProxyRegistrationUpdateRefusesPendingPort(t *testing.T) {
+	home := t.TempDir()
+	store := settings.NewStore(home)
+	if _, _, err := store.Update(t.Context(), func(cfg *settings.Config) error {
+		cfg.Server.Port = 8081
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &testSettingsServer{store: store,
+		registration: launchd.Registration{Program: "/usr/local/bin/kuri", Port: 8080, AtBoot: true, AppStartup: true},
+		state:        daemon.State{PID: 123, Mode: "background", Port: 8080}}
+	result := updateSettings(t.Context(), app, home, settings.Edit{PrepareProxy: true})
+	if result.applied || result.err == nil || !strings.Contains(result.err.Error(), "Apply the port setting") || app.state.PID != 123 {
+		t.Fatalf("port mismatch: %+v, state %+v", result, app.state)
+	}
+}
+
+func TestIndependentCLIUpdateUsesCLIInstruction(t *testing.T) {
+	home := t.TempDir()
+	app := &testSettingsServer{registration: launchd.Registration{Program: "/usr/local/bin/kuri", Port: 80, AtBoot: true}}
+	result := updateSettings(t.Context(), app, home, settings.Edit{PrepareProxy: true})
+	if app.registration.CanUpdateFromApp() || result.applied || result.err == nil || !strings.Contains(result.err.Error(), "./kuri install") {
+		t.Fatalf("independent CLI update: %+v", result)
+	}
+}
 
 func TestFailedPortChangeRestoresSavedPortAndKeepsOtherFields(t *testing.T) {
 	home := t.TempDir()

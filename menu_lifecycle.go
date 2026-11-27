@@ -131,7 +131,7 @@ func pauseBackground(ctx context.Context, app *daemon.App, home string, quit boo
 		}
 		return daemon.ErrNoBackground
 	}
-	if err := launchd.CheckProxyPauseSupport(ctx, home); err != nil {
+	if err := launchd.CheckProxyPauseSupport(ctx, home, state.PID, app.SupportsLiveProxyPause); err != nil {
 		return err
 	}
 	return settings.NewStore(home).SetProxyPaused(ctx, true)

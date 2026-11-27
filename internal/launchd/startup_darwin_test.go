@@ -118,6 +118,46 @@ func TestStandaloneStartupRegistrationPreserved(t *testing.T) {
 	}
 }
 
+func TestRefreshManagedProxyReplacesLoadedJob(t *testing.T) {
+	system := newStartupTestSystem(t)
+	home := filepath.Join(system.root, "home")
+	original := system.executable(t, "original")
+	if err := os.WriteFile(original, []byte("#!/bin/sh\n# original\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := system.runScript(t, true, "--first-run", original, system.account, home, system.template(), "8080"); code != 0 {
+		t.Fatalf("install managed proxy: %d %s", code, out)
+	}
+	replacement := system.executable(t, "replacement")
+	if err := os.WriteFile(replacement, []byte("#!/bin/sh\n# replacement\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := system.run(t, "refresh-proxy", replacement, false); code != 77 {
+		t.Fatalf("refreshed without approval: %d %s", code, out)
+	}
+	system.flag(t, "fail-bootstrap")
+	if out, code := system.run(t, "refresh-proxy", replacement, true); code == 0 {
+		t.Fatalf("refresh succeeded despite bootstrap failure: %s", out)
+	}
+	program := filepath.Join(system.root, "support", "kuri")
+	contents, err := os.ReadFile(program)
+	if err != nil || !strings.Contains(string(contents), "original") {
+		t.Fatalf("previous executable was not restored: %s %v", contents, err)
+	}
+	if out, code := system.run(t, "refresh-proxy", replacement, true); code != 0 {
+		t.Fatalf("refresh managed proxy: %d %s", code, out)
+	}
+	contents, err = os.ReadFile(program)
+	if err != nil || !strings.Contains(string(contents), "replacement") {
+		t.Fatalf("replacement executable: %s %v", contents, err)
+	}
+	system.checkPlist(t, "RunAtLoad", "false")
+	system.checkPlist(t, "Sockets.HTTP.0.SockServiceName", "8080")
+	if changes := system.changes(t); changes != "enable\nbootstrap\nbootout\nbootstrap\nbootstrap\nbootout\nbootstrap\n" {
+		t.Fatalf("managed job was not replaced and restored as expected: %s", changes)
+	}
+}
+
 func TestStartupRequestsApprovalOnlyWhenNeeded(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("administrator invocation does not request approval")

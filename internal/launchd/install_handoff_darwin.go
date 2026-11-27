@@ -11,12 +11,13 @@ import (
 	"time"
 )
 
-func ConvertAppStartup(ctx context.Context, home, source string, stderr io.Writer, handoff func(context.Context) error) error {
-	if handoff == nil {
-		return changeStartup(ctx, "convert-app", source, io.Discard, stderr)
+func UpdateProxyRegistration(ctx context.Context, home, source string, reg Registration, stderr io.Writer, handoff func(context.Context) error) error {
+	operation := "refresh-proxy"
+	if reg.AppStartup {
+		operation = "convert-app"
 	}
 	return runStartupHandoff(ctx, home, handoff, func(ctx context.Context, dir string) error {
-		return changeStartup(ctx, "convert-app", source, io.Discard, stderr, "80", "", dir)
+		return changeStartup(ctx, operation, source, io.Discard, stderr, "80", "", dir)
 	})
 }
 

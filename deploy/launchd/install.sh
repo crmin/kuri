@@ -281,6 +281,55 @@ await_startup_handoff() {
     ' kuri-startup-handoff "$handoff_directory" || fail 'The kuri settings operation did not complete.'
 }
 
+stage_proxy_replacement() {
+    if exists "$program"; then
+        [ -f "$program" ] && protected_by_root "$program" || fail 'Unsafe kuri executable.'
+        /bin/cp -p "$program" "$staging/original.program"
+    fi
+    case "$binary" in /*) ;; *) fail 'Specify an absolute kuri executable path.' ;; esac
+    /usr/bin/sudo -n -u "$account" -- /bin/cat "$binary" > "$staging/kuri"
+    [ -s "$staging/kuri" ] || fail 'The replacement kuri executable is empty.'
+    /usr/bin/install -o root -g wheel -m 0755 "$staging/kuri" "$staging/new.program"
+}
+
+unload_proxy_for_update() {
+    read_loaded_job
+    [ -n "$loaded_job" ] || return 0
+    verify_loaded_job || fail 'The loaded kuri LaunchDaemon differs from its registered configuration.'
+    saved_pid=$(printf '%s\n' "$loaded_job" | /usr/bin/sed -n 's/^\tpid = //p')
+    saved_birth=
+    if [ -n "$saved_pid" ]; then
+        menu_process_birth "$saved_pid"
+        saved_birth=$process_birth
+        if [ -z "$saved_birth" ]; then saved_pid=; fi
+    fi
+    bootout_attempted=true
+    /bin/launchctl bootout "system/$label"
+    wait_menu_process
+}
+
+replace_proxy_binary() {
+    program_changed=true
+    /bin/mv -fh "$staging/new.program" "$program"
+}
+
+reload_proxy_job() {
+    clear_activation
+    bootstrap_attempted=true
+    /bin/launchctl bootstrap system "$plist"
+}
+
+refresh_managed_proxy() {
+    [ "$registered" = legacy ] || [ "$registered" = eager ] || fail 'This registration cannot be updated by the kuri app.'
+    [ -f "$program" ] && protected_by_root "$program" || fail 'Unsafe kuri executable.'
+    require_admin
+    stage_proxy_replacement
+    await_startup_handoff
+    unload_proxy_for_update
+    replace_proxy_binary
+    if "$bootout_attempted"; then reload_proxy_job; fi
+}
+
 convert_app_startup() {
     [ "$registered" = startup ] && [ -L "$link" ] || fail 'No previous kuri app startup registration was found.'
     original_link=$(/usr/bin/readlink "$link")
@@ -291,9 +340,6 @@ convert_app_startup() {
     case "$digest_dir" in ''|*[!0-9a-f]*) fail 'Invalid kuri app executable path.' ;; esac
     [ "${#digest_dir}" -eq 64 ] && trusted_path "$original_link" && trusted_path "$bin_directory" ||
         fail 'Unsafe kuri app startup registration.'
-    if exists "$program"; then
-        [ -f "$program" ] && protected_by_root "$program" || fail 'Unsafe kuri executable.'
-    fi
     read_menu_pause
     case "$pause_stage" in
         ''|completed) ;;
@@ -305,30 +351,21 @@ convert_app_startup() {
         *) fail 'Finish the current kuri startup operation before updating its registration.' ;;
     esac
     require_admin
-    /usr/bin/sudo -n -u "$account" -- /bin/cat "$binary" > "$staging/kuri"
-    [ -s "$staging/kuri" ] || fail 'The replacement kuri executable is empty.'
-    await_startup_handoff
+    stage_proxy_replacement
     plist_stage=$(/usr/bin/mktemp -d "${plist%/*}/.kuri.XXXXXX")
     /bin/cp -p "$plist" "$plist_stage/original.plist"
     if exists "$pause_file"; then /bin/cp -p "$pause_file" "$plist_stage/original.pause"; fi
-    if exists "$program"; then /bin/cp -p "$program" "$staging/original.program"; fi
     printf '%s\n' "$template" > "$staging/sockets.plist"
     configure_plist "$staging/sockets.plist" legacy "$registered_port"
     /usr/bin/install -o root -g wheel -m 0644 "$staging/sockets.plist" "$plist_stage/sockets.plist"
-    /usr/bin/install -o root -g wheel -m 0755 "$staging/kuri" "$staging/new.program"
-    if [ -n "$loaded_job" ]; then
-        bootout_attempted=true
-        /bin/launchctl bootout "system/$label"
-    fi
-    program_changed=true
-    /bin/mv -fh "$staging/new.program" "$program"
+    await_startup_handoff
+    unload_proxy_for_update
+    replace_proxy_binary
     link_removed=true
     change_link remove
     /bin/mv -fh "$plist_stage/sockets.plist" "$plist"
     /bin/rm -f "$pause_file"
-    clear_activation
-    bootstrap_attempted=true
-    /bin/launchctl bootstrap system "$plist"
+    reload_proxy_job
 }
 
 startup_command() {
@@ -360,10 +397,10 @@ startup_command() {
     trap 'exit 130' HUP INT TERM
     staging=$(/usr/bin/mktemp -d /private/var/tmp/kuri-install.XXXXXX)
     verify_registration
-    if [ "$operation" = --startup-convert-app ]; then
-        convert_app_startup
-        return
-    fi
+    case "$operation" in
+        --startup-convert-app) convert_app_startup; return ;;
+        --startup-refresh-proxy) refresh_managed_proxy; return ;;
+    esac
     if [ "$operation" = --startup-install ]; then
         read_menu_pause
         case "$pause_stage" in
@@ -762,7 +799,7 @@ esac
 
 if { [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && {
     [ "$1" = --startup-install ] || [ "$1" = --startup-uninstall ] || [ "$1" = --startup-unregister-sockets ] ||
-        [ "$1" = --startup-convert-app ]
+        [ "$1" = --startup-convert-app ] || [ "$1" = --startup-refresh-proxy ]
 }; then
     startup_command "$@"
     exit 0

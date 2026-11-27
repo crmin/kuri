@@ -97,6 +97,9 @@ func TestAutoStartPolicyForBootHTTPAndManual(t *testing.T) {
 			if state, err := app.State(ctx); state.PID != 0 || err != nil {
 				t.Fatalf("automatic proxy became ready: %+v, %v", state, err)
 			}
+			if !app.SupportsLiveProxyPause(ctx) {
+				t.Fatal("idle activation did not advertise pause support")
+			}
 			conn, err := (&net.Dialer{}).DialContext(ctx, "unix", app.activation)
 			if err != nil {
 				t.Fatal(err)
