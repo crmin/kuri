@@ -445,7 +445,7 @@ static NSString *settingsString(id value) {
 - (void)renderStyles:(NSDictionary *)server {
     NSDictionary *templates = @{
         @"explicit_context": @"service.namespace.ctx",
-        @"explicit_port": @"port.service.namespace.ctx",
+        @"explicit_port": @"portName.service.namespace.ctx",
         @"current_context": @"service.namespace"
     };
     NSNumber *port = server[@"port"];

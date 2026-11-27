@@ -96,12 +96,16 @@ func TestHelpCommands(t *testing.T) {
 	if err := WriteHelp(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, part := range []string{"kuri", "foreground", "help", "start", "background", "stop", "kuri status", "kuri install", "kuri uninstall", "SHA-256"} {
+	for _, part := range []string{"kuri", "foreground", "help", "start", "background", "stop", "kuri status", "kuri install", "kuri uninstall", "SHA-256",
+		"portName.service.namespace.ctx.kuri.localhost"} {
 		if !strings.Contains(out.String(), part) {
 			t.Errorf("help is missing %q", part)
 		}
 	}
 	if strings.Contains(out.String(), "kuri state") {
 		t.Fatal("help lists the old command")
+	}
+	if strings.Contains(out.String(), "port.service.namespace.ctx.kuri.localhost") {
+		t.Fatal("help lists the old numeric domain style")
 	}
 }

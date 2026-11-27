@@ -13,6 +13,7 @@ import (
 	"github.com/crmin/kuri/internal/forward"
 	"github.com/crmin/kuri/internal/menuview"
 	"github.com/crmin/kuri/internal/route"
+	"github.com/crmin/kuri/internal/settings"
 )
 
 func TestRecentForwards(t *testing.T) {
@@ -38,6 +39,45 @@ func TestRecentForwards(t *testing.T) {
 	got, err = legacyMenuState(state, menuview.LegacyRecentLimit)
 	if err != nil || got.RecentAvailable || got.Connected != 7 || len(got.Rows) != 0 {
 		t.Fatalf("unexpected legacy snapshot: %+v %v", got, err)
+	}
+}
+
+func TestRecentNamedServicePortURL(t *testing.T) {
+	cfg := settings.Defaults("").Server
+	cfg.Domain, cfg.Port = "kuri.example.test", 8081
+	runtime := proxyRuntime{routes: route.NewConfiguredContexts("prod", []string{"prod"}, cfg)}
+	state := State{PID: 42, Mode: "foreground", Started: time.Now()}
+	web := route.Target{Context: "prod", Service: "our-product", Namespace: "service", Port: 3000}
+	admin := web
+	admin.Port = 8000
+	rows := []forward.Row{{Target: web, PortName: "web"}, {Target: admin, PortName: "admin"}}
+	view := func() menuview.State {
+		t.Helper()
+		got, err := makeMenuState(state, len(rows), runtime.withHosts(rows), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	first := view()
+	for i, portName := range []string{"web", "admin"} {
+		label := portName + ".our-product.service.prod"
+		got := first.Rows[i]
+		if got.Label != label || got.URL != "http://"+label+".kuri.example.test:8081" {
+			t.Errorf("unexpected recent forward: %+v", got)
+		}
+	}
+	rows[0].Port = rows[1].Port
+	second := view()
+	if second.Rows[0].ID != first.Rows[0].ID || second.Rows[0].ID == second.Rows[1].ID {
+		t.Fatalf("recent IDs do not follow port names: %+v", second.Rows)
+	}
+	cfg.Styles.ExplicitPort = false
+	runtime.routes = route.NewConfiguredContexts("prod", []string{"prod"}, cfg)
+	for _, row := range view().Rows {
+		if row.URL != "" {
+			t.Errorf("disabled named style offered a copy URL: %+v", row)
+		}
 	}
 }
 

@@ -69,11 +69,11 @@ func makeMenuState(server State, connected int, recent []forward.Row, available 
 	view.Connected = connected
 	view.Port, view.ProxyFingerprint = server.Port, server.ProxyFingerprint
 	for _, row := range recent {
-		id, err := json.Marshal(row.Target)
+		id, err := json.Marshal(row.Selector())
 		if err != nil {
 			return view, err
 		}
-		item := menuview.Forward{ID: string(id), Label: route.ForwardLabel(row.Target, row.DefaultPort)}
+		item := menuview.Forward{ID: string(id), Label: route.ForwardLabel(row.Target, row.PortName, row.DefaultPort)}
 		if row.MenuHost != "" {
 			item.Label = strings.TrimSuffix(row.MenuHost, ".kuri.localhost")
 			item.URL = "http://" + row.MenuHost

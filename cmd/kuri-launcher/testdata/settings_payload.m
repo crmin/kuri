@@ -1,10 +1,13 @@
 #import "settings_darwin.h"
 
+#include <string.h>
+
 @interface KuriSettings (PayloadFixture)
 - (void)toggle:(NSButton *)sender;
 - (void)changeContext:(NSSwitch *)sender;
 - (void)saveServer:(id)sender;
 - (void)saveForward:(id)sender;
+- (void)renderStyles:(NSDictionary *)server;
 @end
 
 @interface FixtureControl : NSObject
@@ -37,9 +40,28 @@ static FixtureControl *text(NSString *value) {
     return control;
 }
 
-int main(void) {
+static void renderStyleLabels(KuriSettings *settings) {
+    [NSApplication sharedApplication];
+    NSButton *style = [[[NSButton alloc] initWithFrame:NSZeroRect] autorelease];
+    style.font = [NSFont systemFontOfSize:13];
+    [settings setValue:@{@"explicit_port": style} forKey:@"styles"];
+    for (NSDictionary *server in @[
+        @{@"domain": @"kuri.localhost", @"port": @80, @"domain_styles": @{@"explicit_port": @YES}},
+        @{@"domain": @"example.test", @"port": @8081, @"domain_styles": @{@"explicit_port": @NO}}
+    ]) {
+        [settings renderStyles:server];
+        printf("%s\t%s\t%s\t%ld\n", style.attributedTitle.string.UTF8String,
+               style.toolTip.UTF8String, style.accessibilityLabel.UTF8String, (long)style.state);
+    }
+}
+
+int main(int argc, char **argv) {
     @autoreleasepool {
         KuriSettings *settings = [[[KuriSettings alloc] initWithWindow:nil] autorelease];
+        if (argc == 2 && strcmp(argv[1], "style-labels") == 0) {
+            renderStyleLabels(settings);
+            return 0;
+        }
         NSArray<NSString *> *styles = @[@"explicit_context", @"explicit_port", @"current_context"];
         [settings setValue:@{styles[0]: @YES, styles[1]: @YES, styles[2]: @YES} forKey:@"styles"];
         NSArray<NSString *> *checkboxes = [@[@"register", @"auto_start", @"keep_alive"] arrayByAddingObjectsFromArray:styles];

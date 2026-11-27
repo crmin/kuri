@@ -20,7 +20,8 @@ import (
 //go:embed testdata/settings_payload.m
 var settingsPayloadFixture []byte
 
-func TestSettingsEditPayloads(t *testing.T) {
+func settingsFixtureOutput(t *testing.T, args ...string) []byte {
+	t.Helper()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "settings_payload.m")
 	if err := os.WriteFile(source, settingsPayloadFixture, 0600); err != nil {
@@ -31,10 +32,30 @@ func TestSettingsEditPayloads(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("compile settings fixture: %v\n%s", err, output)
 	}
-	output, err := exec.CommandContext(t.Context(), fixture).Output()
+	output, err := exec.CommandContext(t.Context(), fixture, args...).Output()
 	if err != nil {
 		t.Fatalf("run settings fixture: %v", err)
 	}
+	return output
+}
+
+func TestSettingsDomainStyleLabel(t *testing.T) {
+	output := strings.TrimSpace(string(settingsFixtureOutput(t, "style-labels")))
+	lines := strings.Split(output, "\n")
+	want := []string{"portName.service.namespace.ctx.kuri.localhost", "portName.service.namespace.ctx.example.test:8081"}
+	if len(lines) != len(want) {
+		t.Fatalf("unexpected settings fixture output: %q", output)
+	}
+	for i, title := range want {
+		state := strconv.Itoa(1 - i)
+		if expected := strings.Join([]string{title, title, title, state}, "\t"); lines[i] != expected {
+			t.Errorf("got %q, want %q", lines[i], expected)
+		}
+	}
+}
+
+func TestSettingsEditPayloads(t *testing.T) {
+	output := settingsFixtureOutput(t)
 	payloads := make(map[string]string)
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	for scanner.Scan() {

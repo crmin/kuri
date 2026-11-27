@@ -24,7 +24,7 @@ func (m *Manager) UpdatePolicy(policy settings.PortForward, enabled func(string)
 	}
 	now := time.Now()
 	for _, e := range m.entries {
-		if !m.keepAlive || (enabled != nil && !enabled(e.target.Context)) {
+		if !m.keepAlive || (enabled != nil && !enabled(e.key.Context)) {
 			m.retireLocked(e, errExpired)
 			continue
 		}
@@ -73,7 +73,7 @@ func (m *Manager) acquireEphemeral(ctx context.Context, req route.Request) (*Lea
 		closeRequest()
 		return nil, nil, err
 	}
-	destinations, err := m.backend.Resolve(start, req.Target, "")
+	destinations, err := m.backend.Resolve(start, req.Selector, "")
 	if err != nil || len(destinations) == 0 {
 		m.unreserve(e, port)
 		closeRequest()
@@ -92,9 +92,11 @@ func (m *Manager) acquireEphemeral(ctx context.Context, req route.Request) (*Lea
 		closeRequest()
 		return nil, nil, err
 	}
-	e.target, e.lease, e.lastAccess = lease.Destination.Target, lease, time.Now()
+	e.key = route.ResolvedSelector(lease.Destination.Target, lease.Destination.PortName)
+	e.lease, e.lastAccess = lease, time.Now()
 	m.mu.Lock()
 	m.ephemeral[e] = struct{}{}
+	m.updateRecentDefaultLocked(e.key.ServiceTarget(), lease.Destination.DefaultPort)
 	m.recordLocked(e)
 	m.mu.Unlock()
 
