@@ -98,6 +98,8 @@ func run(args []string) int {
 		}
 	case len(args) == 1 && args[0] == "__settings_version":
 		fmt.Fprintln(os.Stdout, "1")
+	case len(args) == 1 && args[0] == "__settings_schema_version":
+		fmt.Fprintln(os.Stdout, settings.SettingsSchemaVersion)
 	case len(args) == 1 && args[0] == "__proxy_pause_version":
 		fmt.Fprintln(os.Stdout, "1")
 	case len(args) == 1 && args[0] == "__settings_get":

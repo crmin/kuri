@@ -181,6 +181,7 @@ func (r *proxyRuntime) state(state State) State {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state.ProxyFingerprint = r.config.ProxyFingerprint()
+	state.SettingsSchema = settings.SettingsSchemaVersion
 	state.Port = r.config.Server.Port
 	cfg := r.config
 	state.AppliedSettings = &cfg

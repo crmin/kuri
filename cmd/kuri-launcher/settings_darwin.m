@@ -100,6 +100,7 @@ static NSString *settingsString(id value) {
 @property(nonatomic, retain) NSButton *prepareProxy;
 @property(nonatomic, retain) NSButton *autoStart;
 @property(nonatomic, retain) NSButton *keepAlive;
+@property(nonatomic, retain) NSButton *autoHealing;
 @property(nonatomic, retain) NSButton *retry;
 @property(nonatomic, retain) NSPopUpButton *trigger;
 @property(nonatomic, retain) NSMutableArray<NSControl *> *controls;
@@ -210,6 +211,10 @@ static NSString *settingsString(id value) {
     inSection:(NSStackView *)section {
     NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
     NSTextField *label = settingsItemLabel(name);
+    if ([identifier isEqualToString:@"check_seconds"]) {
+        label = settingsLabel(name, NSColor.labelColor);
+        label.font = settingsItemFont();
+    }
     NSTextField *field = [[[NSTextField alloc] initWithFrame:NSZeroRect] autorelease];
     [field setAccessibilityLabel:name];
     field.identifier = identifier;
@@ -307,6 +312,11 @@ static NSString *settingsString(id value) {
     [self.controls addObject:self.trigger];
     [section addArrangedSubview:self.trigger];
     [section setCustomSpacing:18 afterView:self.trigger];
+    [section addArrangedSubview:settingsItemLabel(@"Auto Healing")];
+    [self addDescription:@"Check open port forwards at regular intervals. If a reusable connection fails, kuri tries to restore it." to:section];
+    self.autoHealing = [self checkbox:@"Enable auto healing" identifier:@"auto_healing" inSection:section];
+    [self field:@"Connection check interval" identifier:@"check_seconds" width:72 unit:@"seconds" inSection:section];
+    [section setCustomSpacing:18 afterView:section.arrangedSubviews.lastObject];
     [section addArrangedSubview:settingsItemLabel(@"Port Range")];
     [self addDescription:@"kuri uses ports in this range for port forwarding. If no port is available, kuri closes its oldest open port forward to make room for a new one, even when keep-alive is enabled."
                       to:section];
@@ -419,6 +429,7 @@ static NSString *settingsString(id value) {
         control.enabled = !self.busy && self.loaded && (!self.corrupt || reset);
     }
     self.fields[@"minutes"].enabled = self.fields[@"minutes"].enabled && self.keepAlive.state == NSControlStateValueOn;
+    self.fields[@"check_seconds"].enabled = self.fields[@"check_seconds"].enabled && self.autoHealing.state == NSControlStateValueOn;
     self.trigger.enabled = self.trigger.enabled && self.keepAlive.state == NSControlStateValueOn;
     for (NSStackView *row in self.contexts.arrangedSubviews) {
         NSSwitch *toggle = (NSSwitch *)row.arrangedSubviews.lastObject;
@@ -431,6 +442,7 @@ static NSString *settingsString(id value) {
     for (NSString *key in self.fields) {
         NSTextField *field = self.fields[key];
         if (field == self.fields[@"minutes"] && self.keepAlive.state != NSControlStateValueOn) continue;
+        if (field == self.fields[@"check_seconds"] && self.autoHealing.state != NSControlStateValueOn) continue;
         NSString *text = field.currentEditor ? field.currentEditor.string : field.stringValue;
         if (![text isEqualToString:self.saved[key] ?: @""] || ([key isEqual:@"port"] && self.portDraftUnapplied))
             draft[key] = text;
@@ -446,7 +458,7 @@ static NSString *settingsString(id value) {
     NSString *portError = response[@"port_error"];
     NSString *error = response[@"error"];
     BOOL hostEdit = pending[@"domain"] || pending[@"port"];
-    BOOL forwardEdit = pending[@"minutes"] || pending[@"min_port"] || pending[@"max_port"];
+    BOOL forwardEdit = pending[@"minutes"] || pending[@"min_port"] || pending[@"max_port"] || pending[@"check_seconds"];
     BOOL reset = [pending[@"reset"] boolValue];
     if (pending[@"port"] || (reset && applied)) self.portDraftUnapplied = portError.length != 0;
     if (portError.length || hostEdit || reset) {
@@ -468,10 +480,12 @@ static NSString *settingsString(id value) {
         NSDictionary *server = cfg[@"server"], *forward = cfg[@"port_forward"];
         self.autoStart.state = [general[@"auto_start_proxy"] boolValue];
         self.keepAlive.state = [forward[@"keep_alive_enabled"] boolValue];
+        self.autoHealing.state = [forward[@"auto_healing_enabled"] ?: @YES boolValue];
         [self.trigger selectItemAtIndex:[forward[@"keep_alive_trigger"] isEqual:@"forward_opened"] ? 1 : 0];
         self.saved = @{
             @"domain": settingsString(server[@"domain"]), @"port": settingsString(server[@"port"]),
             @"minutes": settingsString(forward[@"keep_alive_minutes"]),
+            @"check_seconds": settingsString(forward[@"connection_check_interval_seconds"] ?: @10),
             @"min_port": settingsString(forward[@"min_port"]), @"max_port": settingsString(forward[@"max_port"]),
         };
         for (NSString *key in self.fields) {
@@ -608,6 +622,7 @@ static NSString *settingsString(id value) {
     NSMutableDictionary *edit = [@{@"min_port": self.fields[@"min_port"].stringValue,
                                   @"max_port": self.fields[@"max_port"].stringValue} mutableCopy];
     if (self.keepAlive.state == NSControlStateValueOn) edit[@"minutes"] = self.fields[@"minutes"].stringValue;
+    if (self.autoHealing.state == NSControlStateValueOn) edit[@"check_seconds"] = self.fields[@"check_seconds"].stringValue;
     [self submit:edit];
     [edit release];
 }

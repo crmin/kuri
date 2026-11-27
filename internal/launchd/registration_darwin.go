@@ -108,16 +108,25 @@ func (r Registration) SupportsSettings(ctx context.Context) bool {
 }
 
 func (r Registration) supports(ctx context.Context, command string) bool {
-	if !r.Present() {
-		return true
-	}
+	return !r.Present() || r.capability(ctx, command) == 1
+}
+
+func (r Registration) SupportsSettingsSchema(ctx context.Context, required int) bool {
+	return !r.Present() || r.capability(ctx, "__settings_schema_version") >= required
+}
+
+func (r Registration) capability(ctx context.Context, command string) int {
 	if os.Geteuid() == 0 {
-		return false
+		return 0
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	answer, err := exec.CommandContext(ctx, r.Program, command).Output()
-	return err == nil && strings.TrimSpace(string(answer)) == "1"
+	if err != nil {
+		return 0
+	}
+	value, _ := strconv.Atoi(strings.TrimSpace(string(answer)))
+	return value
 }
 
 func (r Registration) SupportsProxyPause(ctx context.Context) bool {
@@ -143,6 +152,43 @@ func checkProxyPauseSupport(ctx context.Context, reg Registration, loaded string
 	if loaded == "" {
 		return nil
 	}
+	pid, err := loadedRegistrationPID(reg, loaded)
+	if err != nil {
+		return err
+	}
+	// An idle activation process can outlive its replaced executable on disk.
+	if !reg.SupportsProxyPause(ctx) {
+		return reg.ProxyUpdateError()
+	}
+	return checkIdleActivation(ctx, pid, running, probe)
+}
+
+func CheckSettingsSchema(ctx context.Context, home string, running, required int, probe func(context.Context) bool) error {
+	reg, err := Registered(ctx, home)
+	if errors.Is(err, ErrOtherRegistration) {
+		return nil
+	}
+	if err != nil || !reg.Present() {
+		return err
+	}
+	if !reg.SupportsSettingsSchema(ctx, required) {
+		if reg.CanUpdateFromApp() {
+			return errors.New("Use Update Proxy Registration in General before saving these settings.")
+		}
+		return reg.ProxyUpdateError()
+	}
+	loaded, err := loadedRegistration(ctx)
+	if err != nil || loaded == "" {
+		return err
+	}
+	pid, err := loadedRegistrationPID(reg, loaded)
+	if err != nil {
+		return err
+	}
+	return checkIdleActivation(ctx, pid, running, probe)
+}
+
+func loadedRegistrationPID(reg Registration, loaded string) (int, error) {
 	var path, program string
 	var pid int
 	for line := range strings.SplitSeq(loaded, "\n") {
@@ -157,13 +203,12 @@ func checkProxyPauseSupport(ctx context.Context, reg Registration, loaded string
 		}
 	}
 	if path != registrationPath || program != reg.Program {
-		return errors.New("The loaded kuri LaunchDaemon differs from its registered configuration.")
+		return 0, errors.New("The loaded kuri LaunchDaemon differs from its registered configuration.")
 	}
-	// A runtime already visible to Stop will exit before Stop succeeds. An
-	// idle activation process can outlive its replaced executable on disk.
-	if !reg.SupportsProxyPause(ctx) {
-		return reg.ProxyUpdateError()
-	}
+	return pid, nil
+}
+
+func checkIdleActivation(ctx context.Context, pid, running int, probe func(context.Context) bool) error {
 	if pid > 0 && pid != running && (probe == nil || !probe(ctx)) {
 		return errors.New("The previous kuri activation process is still active. Wait a moment and try again.")
 	}

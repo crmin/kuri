@@ -10,12 +10,45 @@ import (
 	"github.com/crmin/kuri/internal/settings"
 )
 
+type healingPolicy struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	interval time.Duration
+	changed  chan struct{}
+}
+
+type probeSchedule struct {
+	policy healingPolicy
+	ticker *time.Ticker
+	ticks  <-chan time.Time
+}
+
+func (s *probeSchedule) stop() {
+	if s.ticker != nil {
+		s.ticker.Stop()
+		s.ticker, s.ticks = nil, nil
+	}
+}
+
+func (s *probeSchedule) update(policy healingPolicy) {
+	if s.policy.changed == policy.changed {
+		return
+	}
+	s.stop()
+	s.policy = policy
+	if policy.ctx != nil && policy.interval > 0 {
+		s.ticker = time.NewTicker(policy.interval)
+		s.ticks = s.ticker.C
+	}
+}
+
 // UpdatePolicy makes new acquisitions follow the saved range and keep-alive
 // rules. Requests already using a retired forward can finish on its lease.
 func (m *Manager) UpdatePolicy(policy settings.PortForward, enabled func(string) bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.minPort, m.maxPort = policy.MinPort, policy.MaxPort+1
+	m.updateHealingLocked(policy)
 	m.keepAlive = policy.KeepAlive
 	m.enabled = enabled
 	m.lifetime, m.trigger = 0, ""
@@ -50,6 +83,23 @@ func (m *Manager) UpdatePolicy(policy settings.PortForward, enabled func(string)
 	m.ports.mu.Unlock()
 }
 
+func (m *Manager) updateHealingLocked(policy settings.PortForward) {
+	healing := &m.healing
+	interval, enabled := policy.CheckInterval(), policy.AutoHealingEnabled()
+	if enabled == (healing.ctx != nil) && interval == healing.interval {
+		return
+	}
+	if enabled && healing.ctx == nil {
+		healing.ctx, healing.cancel = context.WithCancel(m.ctx)
+	} else if !enabled && healing.ctx != nil {
+		healing.cancel()
+		healing.ctx, healing.cancel = nil, nil
+	}
+	healing.interval = interval
+	close(healing.changed)
+	healing.changed = make(chan struct{})
+}
+
 func (m *Manager) containsPortLocked(port int) bool {
 	return port >= m.minPort && port < m.maxPort
 }
@@ -67,7 +117,7 @@ func (m *Manager) acquireEphemeral(ctx context.Context, req route.Request) (*Lea
 	start, stop := context.WithTimeout(lifetime, startupTimeout)
 	defer stop()
 
-	e := &entry{owner: m, host: req.Host, ephemeral: true}
+	e := &entry{owner: m, host: req.Host, ephemeral: true, ctx: lifetime}
 	port, _, err := m.reserve(start, e, nil)
 	if err != nil {
 		closeRequest()
@@ -98,6 +148,7 @@ func (m *Manager) acquireEphemeral(ctx context.Context, req route.Request) (*Lea
 	m.ephemeral[e] = struct{}{}
 	m.updateRecentDefaultLocked(e.key.ServiceTarget(), lease.Destination.DefaultPort)
 	m.recordLocked(e)
+	m.workers.Go(func() { m.watch(e, lease) })
 	m.mu.Unlock()
 
 	release := sync.OnceFunc(func() {

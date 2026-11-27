@@ -14,6 +14,8 @@ type Edit struct {
 	Context      *ContextEdit `json:"context,omitempty"`
 	Style        *StyleEdit   `json:"style,omitempty"`
 	KeepAlive    *bool        `json:"keep_alive,omitempty"`
+	AutoHealing  *bool        `json:"auto_healing,omitempty"`
+	CheckSeconds *string      `json:"check_seconds,omitempty"`
 	Trigger      *string      `json:"trigger,omitempty"`
 	Domain       *string      `json:"domain,omitempty"`
 	Port         *string      `json:"port,omitempty"`
@@ -64,6 +66,16 @@ func (e Edit) Apply(c *Config) error {
 	}
 	if e.KeepAlive != nil {
 		c.PortForward.KeepAlive = *e.KeepAlive
+	}
+	if e.AutoHealing != nil {
+		c.PortForward.AutoHealing = new(*e.AutoHealing)
+	}
+	if e.CheckSeconds != nil {
+		seconds, err := strconv.Atoi(*e.CheckSeconds)
+		if err != nil {
+			return errors.New("Enter a positive connection check interval in whole seconds.")
+		}
+		c.PortForward.CheckSeconds = &seconds
 	}
 	if e.Trigger != nil {
 		c.PortForward.Trigger = *e.Trigger

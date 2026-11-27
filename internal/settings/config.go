@@ -44,16 +44,20 @@ type DomainStyles struct {
 }
 
 const (
-	LastRequest   = "last_request"
-	ForwardOpened = "forward_opened"
+	LastRequest           = "last_request"
+	ForwardOpened         = "forward_opened"
+	SettingsSchemaVersion = 1
+	defaultCheckSeconds   = 10
 )
 
 type PortForward struct {
-	KeepAlive bool    `yaml:"keep_alive_enabled" json:"keep_alive_enabled"`
-	Minutes   float64 `yaml:"keep_alive_minutes" json:"keep_alive_minutes"`
-	Trigger   string  `yaml:"keep_alive_trigger" json:"keep_alive_trigger"`
-	MinPort   int     `yaml:"min_port" json:"min_port"`
-	MaxPort   int     `yaml:"max_port" json:"max_port"`
+	KeepAlive    bool    `yaml:"keep_alive_enabled" json:"keep_alive_enabled"`
+	Minutes      float64 `yaml:"keep_alive_minutes" json:"keep_alive_minutes"`
+	Trigger      string  `yaml:"keep_alive_trigger" json:"keep_alive_trigger"`
+	MinPort      int     `yaml:"min_port" json:"min_port"`
+	MaxPort      int     `yaml:"max_port" json:"max_port"`
+	AutoHealing  *bool   `yaml:"auto_healing_enabled,omitempty" json:"auto_healing_enabled,omitempty"`
+	CheckSeconds *int    `yaml:"connection_check_interval_seconds,omitempty" json:"connection_check_interval_seconds,omitempty"`
 }
 
 func Defaults(home string) Config {
@@ -95,6 +99,15 @@ func (c *Config) Validate() error {
 	if fwd.Trigger != LastRequest && fwd.Trigger != ForwardOpened {
 		return errors.New("Choose a valid keep-alive timer trigger.")
 	}
+	if fwd.CheckInterval() <= 0 {
+		return errors.New("Enter a positive connection check interval in whole seconds.")
+	}
+	if fwd.AutoHealingEnabled() {
+		c.PortForward.AutoHealing = nil
+	}
+	if fwd.CheckInterval() == defaultCheckSeconds*time.Second {
+		c.PortForward.CheckSeconds = nil
+	}
 	c.Server.Domain = domain
 	c.Kubernetes.ConfigPath = filepath.Clean(c.Kubernetes.ConfigPath)
 	excluded := slices.Clone(c.Kubernetes.ExcludedContexts)
@@ -116,6 +129,26 @@ func (f PortForward) Duration() time.Duration {
 	return time.Duration(nanos)
 }
 
+func (f PortForward) AutoHealingEnabled() bool { return f.AutoHealing == nil || *f.AutoHealing }
+
+func (f PortForward) CheckInterval() time.Duration {
+	if f.CheckSeconds == nil {
+		return defaultCheckSeconds * time.Second
+	}
+	seconds := *f.CheckSeconds
+	if seconds <= 0 || int64(seconds) > math.MaxInt64/int64(time.Second) {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (c Config) RequiredSchemaVersion() int {
+	if c.PortForward.AutoHealing != nil || c.PortForward.CheckSeconds != nil {
+		return 1
+	}
+	return 0
+}
+
 func (c Config) Fingerprint() string {
 	return fingerprint(c)
 }
@@ -125,6 +158,9 @@ func (c Config) ProxyFingerprint() string {
 	if !c.PortForward.KeepAlive {
 		c.PortForward.Minutes = 0
 		c.PortForward.Trigger = ""
+	}
+	if !c.PortForward.AutoHealingEnabled() {
+		c.PortForward.CheckSeconds = nil
 	}
 	return fingerprint(c)
 }

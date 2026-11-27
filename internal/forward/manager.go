@@ -83,6 +83,7 @@ type Manager struct {
 	trigger   string
 	enabled   func(string) bool
 	history   []Row
+	healing   healingPolicy
 }
 
 type portPool struct {
@@ -137,6 +138,7 @@ func (m *Manager) NextBackend(backend Backend, policy settings.PortForward) *Man
 
 func newManager(backend Backend, minPort, maxPort int, check func(int) error, probe func(context.Context, *Lease) error) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
+	heal, stopHealing := context.WithCancel(ctx)
 	return &Manager{
 		backend: backend, ctx: ctx, cancel: cancel, minPort: minPort, maxPort: maxPort,
 		checkPort: check, probe: probe,
@@ -144,6 +146,7 @@ func newManager(backend Backend, minPort, maxPort int, check func(int) error, pr
 		lookups: make(map[route.Selector]*lookup), ephemeral: make(map[*entry]struct{}),
 		ports:     &portPool{owners: make(map[int]*entry), changed: make(chan struct{})},
 		keepAlive: true, lifetime: 60 * time.Minute, trigger: settings.LastRequest,
+		healing: healingPolicy{ctx: heal, cancel: stopHealing, interval: probeInterval, changed: make(chan struct{})},
 	}
 }
 
@@ -366,12 +369,19 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 	ctx, cancel := context.WithTimeout(e.ctx, startupTimeout)
 	lease, err := m.open(ctx, e, destinations, false, 0)
 	cancel()
+	var healing context.Context
 
 	for err == nil {
 		m.mu.Lock()
 		if e.opened.IsZero() {
 			e.opened = lease.Connected
 			e.deadline = e.opened.Add(m.lifetime)
+		}
+		if healing != nil && healing.Err() != nil {
+			m.mu.Unlock()
+			m.release(e, lease)
+			err = errRouteChanged
+			break
 		}
 		if e.err != nil || e.retireErr != nil || !m.containsPortLocked(lease.LocalPort) || !time.Now().Before(e.deadline) {
 			m.mu.Unlock()
@@ -387,17 +397,21 @@ func (m *Manager) run(e *entry, destinations []Destination) {
 		m.ports.mu.Unlock()
 		m.mu.Unlock()
 
-		recoverable := m.watch(e, lease)
+		healing = m.watch(e, lease)
+		dead := !lease.isAlive()
 		m.mu.Lock()
 		e.lease = nil
 		e.candidates = []Destination{lease.Destination}
 		m.mu.Unlock()
 		m.release(e, lease)
-		if !recoverable {
+		if healing == nil {
 			err = errExpired
+			if dead {
+				err = errRouteChanged
+			}
 			break
 		}
-		lease, err = m.recover(e, lease.Destination)
+		lease, err = m.recover(e, lease.Destination, healing)
 	}
 	m.mu.Lock()
 	m.removeLocked(e, err)
@@ -452,15 +466,21 @@ func (m *Manager) deadline(e *entry) time.Time {
 	return e.deadline
 }
 
-func (m *Manager) watch(e *entry, lease *Lease) bool {
-	probes := time.NewTicker(probeInterval)
-	defer probes.Stop()
-	timer := time.NewTimer(time.Until(m.deadline(e)))
-	defer timer.Stop()
+func (m *Manager) watch(e *entry, lease *Lease) context.Context {
+	var probes probeSchedule
+	defer probes.stop()
+	var expiry *time.Timer
+	var expiresAt <-chan time.Time
+	if !e.ephemeral {
+		expiry = time.NewTimer(time.Until(m.deadline(e)))
+		defer expiry.Stop()
+		expiresAt = expiry.C
+	}
 	for {
 		m.mu.Lock()
 		expires, retired := e.deadline, e.retireErr != nil
-		if !retired && !time.Now().Before(expires) {
+		policy := m.healing
+		if !e.ephemeral && !retired && !time.Now().Before(expires) {
 			m.retireLocked(e, errExpired)
 			retired = true
 		}
@@ -470,40 +490,58 @@ func (m *Manager) watch(e *entry, lease *Lease) bool {
 			case <-e.ctx.Done():
 			case <-lease.tunnel.Done:
 			}
-			return false
+			return nil
 		}
-		timer.Reset(time.Until(expires))
+		if expiry != nil {
+			expiry.Reset(time.Until(expires))
+		}
+		probes.update(policy)
 		select {
 		case <-e.ctx.Done():
-			return false
+			return nil
 		case <-e.wake:
-		case <-timer.C:
+		case <-expiresAt:
+		case <-policy.changed:
 		case <-lease.tunnel.Done:
-			return m.canRecover(e)
-		case <-probes.C:
+			return m.recoveryScope(e)
+		case <-probes.ticks:
+			if policy.ctx.Err() != nil {
+				continue
+			}
 			ctx, cancel := context.WithTimeout(e.ctx, probeTimeout)
+			stop := context.AfterFunc(policy.ctx, cancel)
 			err := m.probe(ctx, lease)
+			stop()
 			cancel()
-			if err != nil {
-				return m.canRecover(e)
+			if err != nil && policy.ctx.Err() == nil {
+				if current := m.recoveryScope(e); current == policy.ctx {
+					return current
+				}
 			}
 		}
 	}
 }
 
-func (m *Manager) canRecover(e *entry) bool {
+func (m *Manager) recoveryScope(e *entry) context.Context {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return e.retireErr == nil && e.ctx.Err() == nil
+	if e.ephemeral || e.retireErr != nil || e.ctx.Err() != nil {
+		return nil
+	}
+	return m.healing.ctx
 }
 
-func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
-	for e.ctx.Err() == nil {
+func (m *Manager) recover(e *entry, failed Destination, healing context.Context) (*Lease, error) {
+	scope, stop := context.WithCancel(e.ctx)
+	defer stop()
+	stopOnPolicy := context.AfterFunc(healing, stop)
+	defer stopOnPolicy()
+	for scope.Err() == nil && healing.Err() == nil {
 		deadline := m.deadline(e)
 		if !time.Now().Before(deadline) {
 			break
 		}
-		ctx, cancel := context.WithDeadline(e.ctx, deadline)
+		ctx, cancel := context.WithDeadline(scope, deadline)
 		attempt, stopAttempt := context.WithTimeout(ctx, startupTimeout)
 		destinations, err := m.backend.Resolve(attempt, e.key, failed.PodUID)
 		if err == nil && len(destinations) > 0 {
@@ -541,10 +579,13 @@ func (m *Manager) recover(e *entry, failed Destination) (*Lease, error) {
 		}
 		timer := time.NewTimer(delay)
 		select {
-		case <-e.ctx.Done():
+		case <-scope.Done():
 			timer.Stop()
 		case <-timer.C:
 		}
+	}
+	if healing.Err() != nil {
+		return nil, errRouteChanged
 	}
 	return nil, errExpired
 }

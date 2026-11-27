@@ -2,12 +2,58 @@ package settings
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestAutoHealingDefaultsAndValidation(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"port_forward":{"keep_alive_enabled":true}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.PortForward.AutoHealingEnabled() || cfg.PortForward.CheckInterval() != 10*time.Second {
+		t.Fatalf("old proxy response has incorrect defaults: %+v", cfg.PortForward)
+	}
+	store := NewStore(t.TempDir())
+	_, saved, err := store.Update(t.Context(), func(current *Config) error {
+		return (Edit{AutoHealing: new(false), CheckSeconds: new("21")}).Apply(current)
+	})
+	if err != nil || saved.PortForward.AutoHealingEnabled() || saved.PortForward.CheckInterval() != 21*time.Second {
+		t.Fatalf("save disabled settings: %+v, %v", saved.PortForward, err)
+	}
+	for _, interval := range []string{"0", "-2", "9223372037"} {
+		if err := (Edit{CheckSeconds: &interval}).Apply(&saved); err == nil {
+			t.Fatalf("accepted %q", interval)
+		}
+	}
+}
+
+func TestPortRecoveryDecodesLegacyAppliedSettings(t *testing.T) {
+	home := t.TempDir()
+	store := NewStore(home)
+	before := Defaults(home)
+	wire, err := json.Marshal(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Config
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := store.RetainRecovery(t.Context(), "fixture", decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	recovered, err := store.Recovery("fixture")
+	if err != nil || recovered == nil || recovered.Fingerprint() != before.Fingerprint() {
+		t.Fatalf("legacy snapshot could not be restored: %+v, %v", recovered, err)
+	}
+}
 
 func TestProxyPauseExpiresAtNextBoot(t *testing.T) {
 	store := NewStore(t.TempDir())

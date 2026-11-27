@@ -48,6 +48,7 @@ type State struct {
 	Activated        bool             `json:"activated,omitempty"`
 	ForegroundOwner  int              `json:"foreground_owner,omitempty"`
 	AppliedSettings  *settings.Config `json:"applied_settings,omitempty"`
+	SettingsSchema   int              `json:"settings_schema,omitempty"`
 }
 
 type request struct {

@@ -27,6 +27,7 @@ type settingsServer interface {
 	RegisterForPort(context.Context, string) error
 	HandoffDirectForeground(context.Context, daemon.State, string) error
 	EnsurePolicySupport(context.Context) error
+	CheckSettingsSchema(context.Context, daemon.State, int) error
 }
 
 type settingsResult struct {
@@ -74,6 +75,14 @@ func updateSettings(ctx context.Context, app settingsServer, home string, edit s
 	state, err := app.State(ctx)
 	if err != nil {
 		return settingsResult{err: err}
+	}
+	if required := desired.RequiredSchemaVersion(); required > 0 {
+		if err := app.CheckSettingsSchema(ctx, state, required); err != nil {
+			return settingsResult{err: err}
+		}
+		if state.PID != 0 && state.SettingsSchema < required {
+			return settingsResult{err: errors.New("Restart the reverse proxy with the updated kuri binary before saving these settings.")}
+		}
 	}
 
 	if edit.AutoStart != nil && !desired.General.AutoStart {

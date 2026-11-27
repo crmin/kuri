@@ -35,7 +35,8 @@ func loadSettingsView(ctx context.Context, home string, app settingsServer) sett
 	registration, err := launchd.Registered(ctx, home)
 	if err != nil {
 		view.RegistrationError = err.Error()
-	} else if registration.AppStartup || !registration.SupportsProxyPause(ctx) {
+	} else if registration.AppStartup || !registration.SupportsProxyPause(ctx) ||
+		!registration.SupportsSettingsSchema(ctx, settings.SettingsSchemaVersion) {
 		if registration.CanUpdateFromApp() {
 			view.ProxyUpdateNeeded = true
 		} else {

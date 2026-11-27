@@ -20,6 +20,7 @@ type testSettingsServer struct {
 	state        daemon.State
 	blockedPort  int
 	policyErr    error
+	schemaErr    error
 	registration launchd.Registration
 	ownedPort    int
 	start        func(context.Context) (int, error)
@@ -82,6 +83,36 @@ func (*testSettingsServer) HandoffDirectForeground(context.Context, daemon.State
 	return errors.New("unexpected direct foreground handoff")
 }
 func (s *testSettingsServer) EnsurePolicySupport(context.Context) error { return s.policyErr }
+func (s *testSettingsServer) CheckSettingsSchema(context.Context, daemon.State, int) error {
+	return s.schemaErr
+}
+
+func TestLegacyDaemonSettingsCompatibility(t *testing.T) {
+	home := t.TempDir()
+	store := settings.NewStore(home)
+	defaults, err := store.Ensure(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &testSettingsServer{store: store, state: daemon.State{
+		PID: 123, Port: defaults.Server.Port, ProxyFingerprint: defaults.ProxyFingerprint(),
+	}}
+	if result := updateSettings(t.Context(), app, home, settings.Edit{AutoHealing: new(false)}); result.saved || result.err == nil {
+		t.Fatalf("old live process accepted new YAML: %+v", result)
+	}
+	app.state = daemon.State{}
+	app.schemaErr = errors.New("old activation")
+	if result := updateSettings(t.Context(), app, home, settings.Edit{CheckSeconds: new("3")}); result.saved || result.err == nil {
+		t.Fatalf("old activation process accepted new YAML: %+v", result)
+	}
+	if result := updateSettings(t.Context(), app, home, settings.Edit{Reset: true}); !result.saved || result.err != nil {
+		t.Fatalf("reset should retain old YAML compatibility: %+v", result)
+	}
+	raw, err := os.ReadFile(store.Path())
+	if err != nil || strings.Contains(string(raw), "auto_healing_enabled") || strings.Contains(string(raw), "connection_check_interval_seconds") {
+		t.Fatalf("default settings used new keys: %s %v", raw, err)
+	}
+}
 
 func TestProxyRegistrationUpdateRefusesPendingPort(t *testing.T) {
 	home := t.TempDir()

@@ -89,6 +89,13 @@ func (app *App) EnsurePolicySupport(ctx context.Context) error {
 	return launchd.EnsurePolicySupport(ctx, app.home, app.stderr)
 }
 
+func (app *App) CheckSettingsSchema(ctx context.Context, state State, required int) error {
+	return launchd.CheckSettingsSchema(ctx, app.home, state.PID, required, func(ctx context.Context) bool {
+		info, err := app.activationInfo(ctx)
+		return err == nil && info.State.SettingsSchema >= required
+	})
+}
+
 // OwnsRegisteredPort confirms the live listener independently of the plist.
 // Inspecting the activation socket does not request a proxy startup.
 func (app *App) OwnsRegisteredPort(ctx context.Context, port int) (bool, error) {
