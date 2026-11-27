@@ -42,7 +42,7 @@ type proxyBackend struct {
 
 func newProxyRuntime(home string, retained bool, cfg settings.Config, logger *accesslog.Writer, logError func(error)) (*proxyRuntime, error) {
 	r := &proxyRuntime{home: home, retained: retained, logger: logger, logError: logError}
-	backend, err := r.openBackend(cfg, nil)
+	backend, err := r.openBackend(cfg, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -51,10 +51,19 @@ func newProxyRuntime(home string, retained bool, cfg settings.Config, logger *ac
 	return r, nil
 }
 
-func (r *proxyRuntime) openBackend(cfg settings.Config, previous *proxyBackend) (*proxyBackend, error) {
-	kube, _, err := forward.LoadKubernetes(cfg.Kubernetes.ConfigPath)
-	if err != nil {
-		return nil, err
+func (r *proxyRuntime) openBackend(cfg settings.Config, previous *proxyBackend, kube *forward.Kubernetes) (*proxyBackend, error) {
+	if kube == nil {
+		var err error
+		kube, _, err = forward.LoadKubernetes(cfg.Kubernetes.ConfigPath)
+		if err != nil {
+			if cfg.PendingKubeconfigFingerprint() != "" {
+				return nil, errors.Join(ErrKubeconfigChanged, err)
+			}
+			return nil, err
+		}
+	}
+	if expected := cfg.PendingKubeconfigFingerprint(); expected != "" && kube.Fingerprint() != expected {
+		return nil, ErrKubeconfigChanged
 	}
 	if err := kube.StartCredentials(settings.NewStore(r.home).Directory(), r.retained); err != nil {
 		return nil, err
@@ -70,8 +79,9 @@ func (r *proxyRuntime) openBackend(cfg settings.Config, previous *proxyBackend) 
 }
 
 func (r *proxyRuntime) install(cfg settings.Config) {
-	routes := r.current.kube.Routes(cfg.Server, cfg.Kubernetes.ExcludedContexts)
-	r.current.manager.UpdatePolicy(cfg.PortForward, routes.Enabled)
+	cfg.PendingKubeconfigs = nil
+	routes := r.current.kube.Routes(cfg.Server, cfg.Kubernetes.ExcludedContexts, cfg.Kubernetes.Aliases())
+	r.current.manager.UpdatePolicy(cfg.PortForward, routes.Enabled, routes)
 	r.config = cfg
 	r.routes = routes
 	r.handler = proxy.New(routes, r.current.manager, r.logger, r.logError)
@@ -94,7 +104,7 @@ func (r *proxyRuntime) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	handler.ServeHTTP(w, req.WithContext(ctx))
 }
 
-func (r *proxyRuntime) apply(ctx context.Context, fingerprint string, retainPort bool) error {
+func (r *proxyRuntime) apply(ctx context.Context, fingerprint string, retainPort bool, kubeconfigFingerprint string) error {
 	r.applyMu.Lock()
 	defer r.applyMu.Unlock()
 
@@ -138,8 +148,24 @@ func (r *proxyRuntime) apply(ctx context.Context, fingerprint string, retainPort
 			}
 		}
 	}()
-	if cfg.Kubernetes.ConfigPath != original.Kubernetes.ConfigPath {
-		next, err = r.openBackend(cfg, previous)
+	var kube *forward.Kubernetes
+	if expected := cfg.PendingKubeconfigFingerprint(); expected != "" {
+		if kubeconfigFingerprint != "" && kubeconfigFingerprint != expected {
+			return ErrKubeconfigChanged
+		}
+		kubeconfigFingerprint = expected
+	}
+	if kubeconfigFingerprint != "" {
+		kube, _, err = forward.LoadKubernetes(cfg.Kubernetes.ConfigPath)
+		if err != nil {
+			return errors.Join(ErrKubeconfigChanged, err)
+		}
+		if kube.Fingerprint() != kubeconfigFingerprint {
+			return ErrKubeconfigChanged
+		}
+	}
+	if cfg.Kubernetes.ConfigPath != original.Kubernetes.ConfigPath || (kube != nil && kube.Fingerprint() != previous.kube.Fingerprint()) {
+		next, err = r.openBackend(cfg, previous, kube)
 		if err != nil {
 			return err
 		}
@@ -181,6 +207,8 @@ func (r *proxyRuntime) state(state State) State {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state.ProxyFingerprint = r.config.ProxyFingerprint()
+	state.SettingsSchema = settings.SettingsSchemaVersion
+	state.KubeconfigFingerprint = r.current.kube.Fingerprint()
 	state.Port = r.config.Server.Port
 	cfg := r.config
 	state.AppliedSettings = &cfg

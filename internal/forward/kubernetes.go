@@ -3,6 +3,9 @@ package forward
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +39,7 @@ var errRouteUnavailable = errors.New("the Kubernetes service port is unavailable
 
 type Kubernetes struct {
 	config      *clientconfig.Config
+	fingerprint string
 	loader      *clientcmd.ClientConfigLoadingRules
 	credentials *credential.Runner
 
@@ -54,8 +58,20 @@ func LoadKubernetes(filename string) (*Kubernetes, route.Contexts, error) {
 	if err != nil {
 		return nil, route.Contexts{}, fmt.Errorf("load kubeconfig: %w", err)
 	}
-	k := &Kubernetes{config: config, loader: loader}
+	serialized, err := json.Marshal(config)
+	if err != nil {
+		return nil, route.Contexts{}, fmt.Errorf("fingerprint kubeconfig: %w", err)
+	}
+	hash := sha256.Sum256(serialized)
+	k := &Kubernetes{config: config, loader: loader, fingerprint: hex.EncodeToString(hash[:])}
 	return k, k.Routes(settings.Defaults("").Server, nil), nil
+}
+
+func (k *Kubernetes) Fingerprint() string { return k.fingerprint }
+
+func (k *Kubernetes) HasContext(name string) bool {
+	_, exists := k.config.Contexts[name]
+	return exists
 }
 
 func (k *Kubernetes) ContextNames() []string {
@@ -67,11 +83,12 @@ func (k *Kubernetes) ContextNames() []string {
 	return names
 }
 
-func (k *Kubernetes) Routes(server settings.Server, excluded []string) route.Contexts {
-	names := slices.DeleteFunc(k.ContextNames(), func(name string) bool {
-		return slices.Contains(excluded, name)
-	})
-	return route.NewConfiguredContexts(k.config.CurrentContext, names, server)
+func (k *Kubernetes) Routes(server settings.Server, excluded []string, aliases ...map[string]string) route.Contexts {
+	var custom map[string]string
+	if len(aliases) > 0 {
+		custom = aliases[0]
+	}
+	return route.NewContextRoutes(k.config.CurrentContext, k.ContextNames(), server, excluded, custom)
 }
 
 // StartCredentials is called before serving requests. Non-exec kubeconfigs

@@ -28,7 +28,7 @@ func settingsFixtureOutput(t *testing.T, args ...string) []byte {
 		t.Fatal(err)
 	}
 	fixture := filepath.Join(dir, "settings_payload")
-	command := exec.CommandContext(t.Context(), "xcrun", "clang", "-framework", "AppKit", "-framework", "ServiceManagement", "-I", ".", source, "settings_darwin.m", "-o", fixture)
+	command := exec.CommandContext(t.Context(), "xcrun", "clang", "-framework", "AppKit", "-framework", "ServiceManagement", "-framework", "UniformTypeIdentifiers", "-I", ".", source, "settings_darwin.m", "statusitem_darwin.m", "popover_darwin.m", "-o", fixture)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("compile settings fixture: %v\n%s", err, output)
 	}
@@ -48,6 +48,66 @@ func TestLoginItemSettingsRefresh(t *testing.T) {
 	}, "\n")
 	if got != want {
 		t.Fatalf("login item row: got %q, want %q", got, want)
+	}
+}
+
+func TestSettingsCloseShortcut(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "shortcuts"))); got != "ok" {
+		t.Fatalf("shortcut fixture: %q", got)
+	}
+}
+
+func TestMenuKeyboardShortcuts(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "menus"))); got != "ok" {
+		t.Fatalf("menu shortcuts: %q", got)
+	}
+}
+
+func TestSettingsTabsAndAbout(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "tabs"))); got != "General Network About" {
+		t.Fatalf("settings tabs: %q", got)
+	}
+}
+
+func TestSettingsTransferSelection(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "transfer"))); got != "ok" {
+		t.Fatalf("settings transfer: %q", got)
+	}
+}
+
+func TestImportRefreshPreservesSelection(t *testing.T) {
+	output := strings.TrimSpace(string(settingsFixtureOutput(t, "transfer-refresh")))
+	name, payload, _ := strings.Cut(output, "\t")
+	var request struct {
+		Operation string   `json:"transfer_operation"`
+		Fields    []string `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(payload), &request); name != "refresh" || err != nil ||
+		request.Operation != "preview_import" || len(request.Fields) != 1 || request.Fields[0] != "context_aliases" {
+		t.Fatalf("invalid refresh request: %s", output)
+	}
+}
+
+func TestImportPreservesUnselectedDraft(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "transfer-draft"))); got != "ok" {
+		t.Fatalf("settings transfer draft: %q", got)
+	}
+}
+
+func TestSettingsAliasDialog(t *testing.T) {
+	output := strings.TrimSpace(string(settingsFixtureOutput(t, "alias-dialog")))
+	key, value, ok := strings.Cut(output, "\t")
+	var edit settings.Edit
+	if !ok || key != "save_alias" || json.Unmarshal([]byte(value), &edit) != nil || edit.ContextAliases == nil ||
+		edit.ContextAliases.Aliases["aws-dev"] != "dev" || edit.ContextAliases.ConfigPath != "/tmp/kubeconfig" ||
+		edit.ContextAliases.Fingerprint != "fingerprint" {
+		t.Fatalf("alias save: %q", output)
+	}
+}
+
+func TestSettingsAutoHealingControls(t *testing.T) {
+	if got := strings.TrimSpace(string(settingsFixtureOutput(t, "auto-healing"))); got != "ok" {
+		t.Fatalf("auto healing controls: %q", got)
 	}
 }
 

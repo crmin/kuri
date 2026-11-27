@@ -239,7 +239,7 @@ func restoreServingPort(ctx context.Context, app settingsServer, home string, be
 		}
 		return applySavedSettings(ctx, app, state, cfg)
 	}
-	return nil
+	return verifySavedKubeconfig(cfg)
 }
 
 var errForegroundClosed = errors.New("The foreground terminal exited before the reverse proxy restarted.")
@@ -257,7 +257,7 @@ func prepareRegisteredStart(ctx context.Context, app settingsServer, home string
 	if err != nil || cfg.Server.Port == registered.Port {
 		return err
 	}
-	result := switchSavedPort(ctx, app, home, state, cfg, registered.Port)
+	result := switchSavedPort(ctx, app, home, state, cfg, registered.Port, nil)
 	return result.err
 }
 
@@ -270,7 +270,7 @@ func waitForForegroundRestart(ctx context.Context, app settingsServer, previous 
 		state, err := app.State(ctx)
 		if err == nil && state.Mode == "foreground" && state.Port == cfg.Server.Port &&
 			state.ProxyFingerprint == cfg.ProxyFingerprint() && state.ForegroundOwner == previous.ForegroundOwner {
-			return nil
+			return verifyServingKubeconfig(state, cfg)
 		}
 		if previous.ForegroundOwner > 0 && errors.Is(syscall.Kill(previous.ForegroundOwner, 0), syscall.ESRCH) {
 			return errForegroundClosed
@@ -290,6 +290,13 @@ func confirmServingSettings(ctx context.Context, app settingsServer, cfg setting
 	}
 	if state.PID == 0 || state.Port != cfg.Server.Port || state.ProxyFingerprint != cfg.ProxyFingerprint() {
 		return fmt.Errorf("The reverse proxy did not become ready on port %d.", cfg.Server.Port)
+	}
+	return verifyServingKubeconfig(state, cfg)
+}
+
+func verifyServingKubeconfig(state daemon.State, cfg settings.Config) error {
+	if expected := cfg.PendingKubeconfigFingerprint(); expected != "" && state.KubeconfigFingerprint != expected {
+		return errKubeconfigChanged
 	}
 	return nil
 }

@@ -156,7 +156,11 @@ func (s Store) writeAt(cfg Config, path string) error {
 }
 
 func (s Store) replaceFile(path string, data []byte) error {
-	file, err := os.CreateTemp(s.Directory(), ".settings-*")
+	return replaceSettingsFile(s.Directory(), path, data)
+}
+
+func replaceSettingsFile(directory, path string, data []byte) error {
+	file, err := os.CreateTemp(directory, ".settings-*")
 	if err != nil {
 		return err
 	}

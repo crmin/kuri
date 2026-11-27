@@ -586,6 +586,116 @@ func TestProbeReconnectUntilExpiry(t *testing.T) {
 	})
 }
 
+func TestLiveAutoHealingPolicy(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := testManager(stubBackend{})
+		defer manager.Close()
+		var probes atomic.Int32
+		manager.probe = func(context.Context, *Lease) error { probes.Add(1); return nil }
+		policy := settings.Defaults("").PortForward
+		_ = acquire(t, manager, request("api"))
+		policy.CheckSeconds = new(3)
+		manager.UpdatePolicy(policy, nil)
+		synctest.Wait()
+		for range 3 {
+			time.Sleep(time.Second)
+			_ = acquire(t, manager, request("api"))
+		}
+		synctest.Wait()
+		if probes.Load() != 1 {
+			t.Fatalf("expected a probe while requests continue, got %d", probes.Load())
+		}
+		policy.AutoHealing = new(false)
+		manager.UpdatePolicy(policy, nil)
+		time.Sleep(20 * time.Second)
+		synctest.Wait()
+		if probes.Load() != 1 {
+			t.Fatalf("disabled policy issued more probes: %d", probes.Load())
+		}
+	})
+}
+
+func TestAliasReloadUpdatesProbeHost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := testManager(stubBackend{})
+		defer manager.Close()
+		cfg := settings.Defaults("")
+		var probes atomic.Int32
+		manager.probe = func(_ context.Context, lease *Lease) error {
+			if got := lease.probeAuthority(); got != "api.default.renamed.kuri.localhost" {
+				t.Errorf("probe used old address %q", got)
+			}
+			probes.Add(1)
+			return nil
+		}
+		old := route.NewConfiguredContexts("dev", []string{"dev"}, cfg.Server)
+		manager.UpdatePolicy(cfg.PortForward, old.Enabled, old)
+		initial := acquire(t, manager, request("api"))
+		next := route.NewContextRoutes("dev", []string{"dev"}, cfg.Server, nil, map[string]string{"dev": "renamed"})
+		manager.UpdatePolicy(cfg.PortForward, next.Enabled, next)
+		time.Sleep(probeInterval)
+		synctest.Wait()
+		if got := acquire(t, manager, request("api")); got != initial || probes.Load() != 1 {
+			t.Fatal("alias reload replaced a healthy lease")
+		}
+	})
+}
+
+func TestAutoHealingChecksActiveEphemeralTunnel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := testManager(stubBackend{})
+		defer manager.Close()
+		var probes atomic.Int32
+		manager.probe = func(context.Context, *Lease) error { probes.Add(1); return errors.New("probe failed") }
+		policy := settings.Defaults("").PortForward
+		policy.KeepAlive, policy.CheckSeconds = false, new(2)
+		manager.UpdatePolicy(policy, nil)
+		lease, release, err := manager.AcquireRequest(t.Context(), request("api"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if probes.Load() != 1 || !lease.isAlive() {
+			t.Fatalf("ephemeral probe altered request lifetime: %d", probes.Load())
+		}
+		release()
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
+		if probes.Load() != 1 {
+			t.Fatal("probe survived request completion")
+		}
+	})
+}
+
+func TestDisableAutoHealingCancelsRecovery(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		resolving := make(chan struct{})
+		canceled := make(chan struct{})
+		manager := testManager(stubBackend{resolve: func(ctx context.Context, selector route.Selector, failed string) ([]Destination, error) {
+			if failed != "" {
+				close(resolving)
+				<-ctx.Done()
+				close(canceled)
+				return nil, ctx.Err()
+			}
+			return []Destination{stubDestination(selector, "pod")}, nil
+		}})
+		defer manager.Close()
+		policy := settings.Defaults("").PortForward
+		manager.probe = func(context.Context, *Lease) error { return errors.New("failed") }
+		_ = acquire(t, manager, request("api"))
+		<-resolving
+		policy.AutoHealing = new(false)
+		manager.UpdatePolicy(policy, nil)
+		<-canceled
+		synctest.Wait()
+		if got := acquire(t, manager, request("api")); !got.isAlive() {
+			t.Fatal("new request inherited canceled recovery")
+		}
+	})
+}
+
 func TestExhaustedPoolEvictsOldest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		manager := testManager(stubBackend{})

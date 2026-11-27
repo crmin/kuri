@@ -88,10 +88,10 @@ func (app *App) serve(ctx context.Context, mode string, listeners []net.Listener
 			state:    func() State { return runtime.state(state) },
 			snapshot: runtime.snapshot,
 			menu:     func(history bool) (menuview.State, error) { return runtime.menu(state, history) },
-			apply: func(fingerprint string, retainPort bool) error {
+			apply: func(fingerprint string, retainPort bool, kubeconfig string) error {
 				applyCtx, cancel := context.WithTimeout(run, startTimeout)
 				defer cancel()
-				return runtime.apply(applyCtx, fingerprint, retainPort)
+				return runtime.apply(applyCtx, fingerprint, retainPort, kubeconfig)
 			},
 			stop: stop, stopped: stopped,
 		}
@@ -279,7 +279,7 @@ type controlCommands struct {
 	state              func() State
 	snapshot           func() []forward.Row
 	menu               func(bool) (menuview.State, error)
-	apply              func(string, bool) error
+	apply              func(string, bool, string) error
 	preparePortRestart func(string) error
 	handoffDirect      func(string) error
 	stop               func()
@@ -323,7 +323,7 @@ func serveRuntimeControl(listener *net.UnixListener, commands controlCommands) {
 					return
 				}
 				_ = conn.SetDeadline(time.Now().Add(startTimeout))
-				if err := commands.apply(req.Fingerprint, req.Action == "apply_settings_retain_port"); err != nil {
+				if err := commands.apply(req.Fingerprint, req.Action == "apply_settings_retain_port", req.KubeconfigFingerprint); err != nil {
 					_ = writeReply(conn, failure(err))
 					return
 				}

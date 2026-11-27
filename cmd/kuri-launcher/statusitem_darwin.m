@@ -4,6 +4,7 @@
 #import "statusitem_darwin.h"
 #import "popover_darwin.h"
 #import "settings_darwin.h"
+#import "shortcuts_darwin.h"
 
 extern void kuriGoReady(void);
 extern void kuriGoVisible(int visible);
@@ -40,6 +41,12 @@ static KuriStatus *application;
     button.action = @selector(showPopover:);
     self.popover = [[[KuriPopover alloc] init] autorelease];
 
+    [self buildRightMenu];
+    [self applyView:@{}];
+    kuriGoReady();
+}
+
+- (void)buildRightMenu {
     self.rightMenu = [[[NSMenu alloc] initWithTitle:@"Kuri"] autorelease];
     self.rightMenu.delegate = self;
     self.rightMenu.autoenablesItems = NO;
@@ -55,12 +62,11 @@ static KuriStatus *application;
     settings.target = self;
     settings.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     [self.rightMenu addItem:settings];
+    [self.rightMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *quit = [[[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(quit:) keyEquivalent:@"q"] autorelease];
     quit.target = self;
     quit.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     [self.rightMenu addItem:quit];
-    [self applyView:@{}];
-    kuriGoReady();
 }
 
 - (void)applyView:(NSDictionary *)view {
@@ -88,7 +94,14 @@ static KuriStatus *application;
 - (void)showRightMenu:(id)sender {
     [self.popover close];
     NSStatusBarButton *button = self.item.button;
+    id monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+        if (!kuriCommandKey(event, KuriKeyQ, @"q")) return event;
+        [self.rightMenu cancelTracking];
+        [self quit:nil];
+        return nil;
+    }];
     [self.rightMenu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, NSHeight(button.bounds)) inView:button];
+    [NSEvent removeMonitor:monitor];
 }
 
 - (void)changeServer:(id)sender {
@@ -99,6 +112,19 @@ static KuriStatus *application;
 - (void)quit:(id)sender { kuriRequestQuit(); }
 - (void)menuWillOpen:(NSMenu *)menu { kuriGoVisible(1); }
 - (void)menuDidClose:(NSMenu *)menu { kuriGoVisible(0); }
+- (BOOL)menuHasKeyEquivalent:(NSMenu *)menu forEvent:(NSEvent *)event target:(id *)target action:(SEL *)action {
+    if (kuriCommandKey(event, KuriKeyQ, @"q")) {
+        *target = self;
+        *action = @selector(quit:);
+        return YES;
+    }
+    if (kuriCommandKey(event, 43, @",")) {
+        *target = self;
+        *action = @selector(openSettings:);
+        return YES;
+    }
+    return NO;
+}
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
     kuriRequestQuit();
     return NSTerminateCancel;

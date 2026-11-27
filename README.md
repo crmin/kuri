@@ -31,9 +31,9 @@ Finder에서 앱이 시작되지 않으면 `~/Library/Logs/kuri/startup.log`에�
 - **Open at Login** 옆의 **Open System Settings**를 누릅니다. macOS의 **Open at Login** 목록에서 `+`를 누르고 kuri를 선택한 뒤 **Add**를 누릅니다.
 - **Start the reverse proxy when kuri opens**를 켜면 로그인 시 자동으로 앱이 열릴 때도 프록시가 시작됩니다. 이 옵션을 끄면 앱만 열립니다. 필요할 때 메뉴의 **Start**나 `kuri start`로 프록시를 켤 수 있습니다.
 - 앱에서 설치한 이전 등록은 General의 **Update Proxy Registration**으로 갱신합니다. 수신 포트 변경이 적용 대기 중이면 먼저 포트 설정을 적용합니다. macOS가 관리자 인증을 요청할 수 있습니다. 독립 CLI 등록은 새 바이너리를 빌드한 디렉터리에서 `./kuri install`을 다시 실행해 갱신합니다.
-- **Kubernetes**에서 kubeconfig 파일을 열고 라우팅할 컨텍스트를 선택합니다. 파일을 바꾸면 새 파일의 모든 컨텍스트가 켜집니다.
-- **Server**와 **Port Forwarding**에서 도메인, 포트, Keep-Alive와 포트 범위를 설정합니다. 저장한 값은 실행 중인 프록시에 바로 적용됩니다. 수신 포트를 변경하면 프록시가 자동으로 재시작합니다. 포트 변경에 실패하면 저장된 포트를 이전 값으로 되돌립니다. 입력값은 그대로 두고 `Save Server Settings` 위에 오류를 표시합니다.
-- **Logs**에서 접근 로그를 열 수 있습니다. **Reset**은 확인 후 기본값을 다시 저장합니다.
+- **General**의 **Kubernetes**에서 kubeconfig를 열고 라우팅할 컨텍스트를 선택합니다. 컨텍스트 옆 말줄임표를 눌러 별칭을 저장합니다. 별칭은 kubeconfig 파일별로 저장됩니다. `aws-dev`의 별칭이 `dev`이면 `api.default.dev.kuri.localhost`로 접속합니다.
+- **Network**에서 도메인, 포트, Keep-Alive, Auto Healing과 포트 범위를 설정합니다. Auto Healing의 기본 검사 주기는 10초입니다. 이 기능을 끄면 주기 검사와 자동 복구를 중단합니다. 저장한 값은 실행 중인 프록시에 적용합니다. 수신 포트 변경에 실패하면 저장된 포트를 이전 값으로 복구합니다.
+- **About**에서 **Import settings**와 **Export settings**로 선택한 설정을 YAML로 옮깁니다. 내보내기 파일에는 현재 kubeconfig의 별칭을 `컨텍스트 이름: 별칭` 형식으로 담을 수 있습니다. 가져온 별칭은 현재 kubeconfig에 같은 이름의 컨텍스트가 있을 때만 적용합니다. **Logs**에서 접근 로그를 열고 **Reset**에서 설정을 초기화할 수 있습니다.
 
 YAML 파일을 직접 편집한 값은 다음 실행 때 적용됩니다.
 
@@ -49,6 +49,8 @@ python -m pip install -r deploy/macos/dmg-requirements.txt
 ```
 
 `dist/kuri.dmg`가 생성됩니다. 파일 위치를 지정하려면 `--output /path/to/kuri.dmg`를 사용합니다. 앱에는 Apple Silicon과 Intel용 실행 파일이 들어 있습니다.
+
+정식 빌드는 변경이 없는 `release/vX.Y.Z` 태그 커밋에서 만듭니다. 개발 빌드는 `deploy/macos/VERSION`에 기록된 목표 버전에 `-rc{yyyymmddhhmm}`을 붙입니다. 접미사에는 빌드를 시작한 시각을 UTC로 표시합니다. 다음 릴리스를 준비할 때 `VERSION`을 새 목표 버전으로 바꿉니다. About에서 전체 버전을 확인할 수 있습니다.
 
 DMG의 구성과 Finder 배치를 검사하려면 같은 가상 환경에서 다음 명령을 실행합니다.
 
@@ -124,7 +126,9 @@ Settings에서 `portName.service.namespace.ctx` 형식을 켜고 `portName` 자�
 
 위 예시는 기본 도메인과 수신 포트 80을 사용합니다. Settings에서 프록시가 받을 도메인 형식과 Kubernetes 컨텍스트를 선택합니다. 수신 포트가 80과 다르면 URL 끝에 `:포트번호`를 붙입니다.
 
-컨텍스트 이름이 소문자 DNS 라벨이면 그대로 사용합니다. 그 외에는 이름의 SHA-256 해시를 16진수로 표시한 뒤 앞 16자리를 `ctx-` 뒤에 붙입니다. 아래 명령으로 `dev.cluster`의 별칭을 확인할 수 있습니다.
+컨텍스트에 별칭을 지정하면 호스트의 `ctx` 자리에 별칭을 사용합니다. 별칭이 다른 컨텍스트의 이름과 같으면 별칭 대상에서만 서비스를 찾습니다.
+
+별칭을 지정하지 않은 컨텍스트의 이름이 소문자 DNS 라벨이면 그대로 사용합니다. 그 외에는 이름의 SHA-256 해시를 16진수로 표시한 뒤 앞 16자리를 `ctx-` 뒤에 붙입니다. 아래 명령으로 `dev.cluster`의 별칭을 확인할 수 있습니다.
 
 ```sh
 printf 'ctx-%s\n' "$(printf %s 'dev.cluster' | shasum -a 256 | cut -c1-16)"
@@ -132,6 +136,8 @@ printf 'ctx-%s\n' "$(printf %s 'dev.cluster' | shasum -a 256 | cut -c1-16)"
 
 ## Port forwards and access logs
 
-By default, a port forward stays open for 60 minutes after its latest request. You can instead count from the time it opens or close each forward when its request finishes. The default forwarding range is 30000 through 39999, inclusive. When the range is full, kuri closes the oldest reusable forward to make room. kuri checks kept-alive forwards every 10 seconds with `HEAD /` and tries to reconnect until their expiration.
+By default, a port forward stays open for 60 minutes after its latest request. You can instead count from the time it opens or close each forward when its request finishes. The default forwarding range is 30000 through 39999, inclusive. When the range is full, kuri closes the oldest reusable forward to make room.
+
+Auto Healing은 기본으로 켜져 있습니다. kuri는 10초마다 열린 포트포워딩에 `HEAD /` 요청을 보내 연결을 확인합니다. 재사용 터널이 끊기면 만료 전까지 복구를 시도합니다. Network 설정에서 검사 주기를 바꾸거나 Auto Healing을 끌 수 있습니다.
 
 kuri records request outcomes and server start and stop events in English in `$HOME/.kuri/access.log` using JSON Lines format. Before writing a new entry, kuri removes entries older than 72 hours and trims the file to keep it within 100 MiB. `status` writes only to standard output. If console output is blocked in foreground mode and the queue fills up, kuri drops some console messages and continues writing to the log file. At shutdown, kuri waits up to one second for pending console messages to print. If standard error is available, kuri reports dropped messages or interrupted console output there.

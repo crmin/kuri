@@ -62,6 +62,26 @@ func (b httpBackend) Open(_ context.Context, destination forward.Destination, po
 
 type testLog struct{ events []accesslog.Event }
 
+type aliasConnector struct{ requests []route.Request }
+
+func (c *aliasConnector) AcquireRequest(_ context.Context, req route.Request) (*forward.Lease, func(), error) {
+	c.requests = append(c.requests, req)
+	return nil, nil, fmt.Errorf("service unavailable in %s", req.Context)
+}
+
+func TestProxyAliasMissDoesNotTryContextName(t *testing.T) {
+	cfg := settings.Defaults("")
+	connector := &aliasConnector{}
+	for _, disabled := range [][]string{nil, {"dev-1"}} {
+		contexts := route.NewContextRoutes("dev", []string{"dev", "dev-1"}, cfg.Server, disabled, map[string]string{"dev-1": "dev"})
+		handler := New(contexts, connector, &testLog{}, func(err error) { t.Error(err) })
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://a.default.dev.kuri.localhost", nil))
+		if len(connector.requests) != 1 || connector.requests[0].Context != "dev-1" {
+			t.Fatalf("alias matched a different context or tried more than once: %+v", connector.requests)
+		}
+	}
+}
+
 func (l *testLog) Write(event accesslog.Event) error {
 	l.events = append(l.events, event)
 	return nil

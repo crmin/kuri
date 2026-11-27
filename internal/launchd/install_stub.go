@@ -29,6 +29,12 @@ func Registered(context.Context, string) (Registration, error) { return Registra
 
 func (r Registration) SupportsSettings(context.Context) bool { return !r.Present() }
 
+func (r Registration) SupportsSettingsSchema(context.Context, int) bool { return !r.Present() }
+
+func CheckSettingsSchema(context.Context, string, int, int, func(context.Context) bool) error {
+	return nil
+}
+
 func (r Registration) SupportsProxyPause(context.Context) bool { return !r.Present() }
 
 func CheckProxyPauseSupport(context.Context, string, int, func(context.Context) bool) error {

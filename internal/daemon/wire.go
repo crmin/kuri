@@ -29,6 +29,7 @@ var (
 	ErrAlreadyRunning        = errors.New("kuri is already running.")
 	ErrAutoStartDisabled     = errors.New("Automatic proxy startup is disabled.")
 	ErrSettingsChanged       = errors.New("Settings changed before the reverse proxy could apply them.")
+	ErrKubeconfigChanged     = errors.New("The kubeconfig changed. Review the current contexts and try again.")
 	ErrPortRestartRequired   = errors.New("Changing this listener requires restarting the reverse proxy.")
 	ErrPortOccupied          = errors.New("port is already in use by another process")
 	ErrIncompatible          = errors.New("Incompatible kuri control protocol. Update the installed kuri binary.")
@@ -38,28 +39,31 @@ var (
 )
 
 type State struct {
-	PID              int              `json:"pid"`
-	Mode             string           `json:"mode"`
-	Started          time.Time        `json:"started"`
-	Rows             []forward.Row    `json:"services"`
-	Token            string           `json:"token,omitempty"`
-	Port             int              `json:"port,omitempty"`
-	ProxyFingerprint string           `json:"proxy_fingerprint,omitempty"`
-	Activated        bool             `json:"activated,omitempty"`
-	ForegroundOwner  int              `json:"foreground_owner,omitempty"`
-	AppliedSettings  *settings.Config `json:"applied_settings,omitempty"`
+	PID                   int              `json:"pid"`
+	Mode                  string           `json:"mode"`
+	Started               time.Time        `json:"started"`
+	Rows                  []forward.Row    `json:"services"`
+	Token                 string           `json:"token,omitempty"`
+	Port                  int              `json:"port,omitempty"`
+	ProxyFingerprint      string           `json:"proxy_fingerprint,omitempty"`
+	Activated             bool             `json:"activated,omitempty"`
+	ForegroundOwner       int              `json:"foreground_owner,omitempty"`
+	AppliedSettings       *settings.Config `json:"applied_settings,omitempty"`
+	SettingsSchema        int              `json:"settings_schema,omitempty"`
+	KubeconfigFingerprint string           `json:"kubeconfig_fingerprint,omitempty"`
 }
 
 type request struct {
-	Version           int    `json:"version"`
-	Action            string `json:"action"`
-	Token             string `json:"token,omitempty"`
-	Menu              bool   `json:"menu,omitempty"`
-	Automatic         bool   `json:"automatic,omitempty"`
-	History           bool   `json:"history,omitempty"`
-	Fingerprint       string `json:"fingerprint,omitempty"`
-	ForegroundHandoff bool   `json:"foreground_handoff,omitempty"`
-	PortChange        string `json:"port_change,omitempty"`
+	Version               int    `json:"version"`
+	Action                string `json:"action"`
+	Token                 string `json:"token,omitempty"`
+	Menu                  bool   `json:"menu,omitempty"`
+	Automatic             bool   `json:"automatic,omitempty"`
+	History               bool   `json:"history,omitempty"`
+	Fingerprint           string `json:"fingerprint,omitempty"`
+	KubeconfigFingerprint string `json:"kubeconfig_fingerprint,omitempty"`
+	ForegroundHandoff     bool   `json:"foreground_handoff,omitempty"`
+	PortChange            string `json:"port_change,omitempty"`
 }
 
 type reply struct {
@@ -89,6 +93,8 @@ func failure(err error) reply {
 		return reply{Code: "auto_start_disabled", Error: err.Error()}
 	case errors.Is(err, ErrSettingsChanged):
 		return reply{Code: "settings_changed", Error: err.Error()}
+	case errors.Is(err, ErrKubeconfigChanged):
+		return reply{Code: "kubeconfig_changed", Error: err.Error()}
 	case errors.Is(err, ErrPortRestartRequired):
 		return reply{Code: "restart_required", Error: err.Error()}
 	case errors.Is(err, ErrPortOccupied):
@@ -127,6 +133,8 @@ func decodeControlReply(decoder *json.Decoder) (reply, error) {
 		return reply{}, ErrAutoStartDisabled
 	case "settings_changed":
 		return reply{}, ErrSettingsChanged
+	case "kubeconfig_changed":
+		return reply{}, ErrKubeconfigChanged
 	case "restart_required":
 		return reply{}, ErrPortRestartRequired
 	case "port_occupied":

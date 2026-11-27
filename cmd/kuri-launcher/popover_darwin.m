@@ -2,6 +2,7 @@
 
 #import "popover_darwin.h"
 #import "settings_darwin.h"
+#import "shortcuts_darwin.h"
 
 extern void kuriGoVisible(int visible);
 extern void kuriGoAction(int action);
@@ -143,6 +144,7 @@ static const CGFloat recentCornerRadius = 12;
 @property(nonatomic, retain) NSBox *headerLine;
 @property(nonatomic, retain) NSBox *rowsLine;
 @property(nonatomic, retain) NSBox *quitLine;
+@property(nonatomic, retain) NSBox *quitSeparator;
 @property(nonatomic, retain) NSArray *rows;
 @property(nonatomic, retain) NSMutableDictionary<NSString *, KuriPopoverButton *> *rowButtons;
 @property(nonatomic, retain) NSMutableDictionary *feedback;
@@ -229,6 +231,7 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.rowsLine = line();
     self.problem = label(@"", [NSFont systemFontOfSize:12], [NSColor systemRedColor]);
     self.quitLine = line();
+    self.quitSeparator = line();
     self.recentButton = rowButton(@"Recent Services", self, @selector(toggleRecent:), KuriRecentMenuButton.class);
     self.recentButton.hoverAction = @selector(showRecent:);
     self.recentButton.leaveAction = @selector(scheduleRecentClose:);
@@ -248,7 +251,7 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.shortcut.alignment = NSTextAlignmentRight;
     for (NSView *view in @[self.headerLine, self.uptime, self.count, self.rowsLine,
                            self.recentButton, self.recentArrow, self.problem, self.quitLine,
-                           self.settingsButton, self.settingsShortcut, self.quitButton, self.shortcut]) {
+                           self.settingsButton, self.settingsShortcut, self.quitSeparator, self.quitButton, self.shortcut]) {
         [self.view addSubview:view];
     }
     self.rowButtons = [NSMutableDictionary dictionary];
@@ -388,9 +391,10 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
     self.quitLine.frame = NSMakeRect(padding, y, width - 2 * padding, 1);
     self.settingsButton.frame = NSMakeRect(padding, y + 4, width - 2 * padding, menuRowHeight);
     self.settingsShortcut.frame = NSMakeRect(width - 60, y + 8, 47, 18);
-    self.quitButton.frame = NSMakeRect(padding, y + 28, width - 2 * padding, menuRowHeight);
-    self.shortcut.frame = NSMakeRect(width - 60, y + 32, 47, 18);
-    NSSize size = NSMakeSize(width, y + 58);
+    self.quitSeparator.frame = NSMakeRect(padding, y + 31, width - 2 * padding, 1);
+    self.quitButton.frame = NSMakeRect(padding, y + 36, width - 2 * padding, menuRowHeight);
+    self.shortcut.frame = NSMakeRect(width - 60, y + 40, 47, 18);
+    NSSize size = NSMakeSize(width, y + 66);
     [self.view setFrameSize:size];
     if (!NSEqualSizes(self.popover.contentSize, size)) self.popover.contentSize = size;
     if (self.recentPanel.isVisible) {
@@ -541,12 +545,12 @@ static KuriPopoverButton *rowButton(NSString *title, id target, SEL action, Clas
 
 - (NSEvent *)handleKey:(NSEvent *)event {
     if (!self.popover.isShown || (event.window != self.view.window && event.window != self.recentPanel)) return event;
+    if (kuriCommandKey(event, KuriKeyQ, @"q")) { [self quit:nil]; return nil; }
     NSEventModifierFlags keys = NSEventModifierFlagCommand | NSEventModifierFlagShift |
         NSEventModifierFlagOption | NSEventModifierFlagControl;
     if ((event.modifierFlags & keys) == NSEventModifierFlagCommand) {
         NSString *key = event.charactersIgnoringModifiers.lowercaseString;
         if ([key isEqualToString:@","]) { [self openSettings:nil]; return nil; }
-        if ([key isEqualToString:@"q"]) { [self quit:nil]; return nil; }
         return event;
     }
     if (event.keyCode == 53) {

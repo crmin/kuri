@@ -40,6 +40,8 @@ class DiskImageTest(unittest.TestCase):
         contents = app / "Contents"
         info = plistlib.loads((contents / "Info.plist").read_bytes())
         self.assertEqual(info["CFBundleExecutable"], "kuri-launcher")
+        self.assertRegex(info["KuriVersion"], r"^v\d+\.\d+\.\d+(-rc\d{12})?$")
+        self.assertEqual(info["CFBundleShortVersionString"], info["KuriVersion"][1:].split("-")[0])
         self.assertTrue((contents / "Resources" / info["CFBundleIconFile"]).is_file())
         for name in ("kuri", info["CFBundleExecutable"]):
             binary = contents / "MacOS" / name

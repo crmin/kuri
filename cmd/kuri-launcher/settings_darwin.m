@@ -1,10 +1,25 @@
 //go:build cgo
 
 #import "settings_darwin.h"
+#import "shortcuts_darwin.h"
 #import <ServiceManagement/ServiceManagement.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 extern void kuriGoSettingsRequest(char *edit);
 extern void kuriGoAction(int action);
+
+@interface KuriSettingsWindow : NSWindow
+@end
+
+@implementation KuriSettingsWindow
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    if (self.isKeyWindow && !self.attachedSheet && kuriCommandKey(event, KuriKeyW, @"w")) {
+        [self performClose:nil];
+        return YES;
+    }
+    return [super performKeyEquivalent:event];
+}
+@end
 
 @interface KuriSettingsCanvas : NSView
 @end
@@ -75,7 +90,8 @@ static NSString *settingsString(id value) {
     return @"";
 }
 
-@interface KuriSettings ()
+@interface KuriSettings () <NSToolbarDelegate>
+@property(nonatomic, retain) NSTabView *tabs;
 @property(nonatomic, retain) NSStackView *contexts;
 @property(nonatomic, retain) NSTextField *path;
 @property(nonatomic, retain) NSTextField *problem;
@@ -85,6 +101,7 @@ static NSString *settingsString(id value) {
 @property(nonatomic, retain) NSButton *prepareProxy;
 @property(nonatomic, retain) NSButton *autoStart;
 @property(nonatomic, retain) NSButton *keepAlive;
+@property(nonatomic, retain) NSButton *autoHealing;
 @property(nonatomic, retain) NSButton *retry;
 @property(nonatomic, retain) NSPopUpButton *trigger;
 @property(nonatomic, retain) NSMutableArray<NSControl *> *controls;
@@ -93,6 +110,18 @@ static NSString *settingsString(id value) {
 @property(nonatomic, retain) NSDictionary *saved;
 @property(nonatomic, retain) NSDictionary *pending;
 @property(nonatomic, retain) NSString *settingsPath;
+@property(nonatomic, retain) NSString *kubeconfigFingerprint;
+@property(nonatomic, retain) NSDictionary *contextAliases;
+@property(nonatomic, retain) NSWindow *dialog;
+@property(nonatomic, retain) NSDictionary *aliasTarget;
+@property(nonatomic, retain) NSTextField *aliasField;
+@property(nonatomic, retain) NSTextField *aliasError;
+@property(nonatomic, retain) NSButton *aliasSave;
+@property(nonatomic, retain) NSString *transferPath;
+@property(nonatomic, retain) NSDictionary *transferPreview;
+@property(nonatomic, retain) NSMutableDictionary<NSString *, NSButton *> *transferChoices;
+@property(nonatomic, retain) NSButton *transferConfirm;
+@property(nonatomic, retain) NSTextField *transferError;
 @property(nonatomic) BOOL busy;
 @property(nonatomic) BOOL loaded;
 @property(nonatomic) BOOL corrupt;
@@ -104,7 +133,7 @@ static NSString *settingsString(id value) {
 
 @implementation KuriSettings
 - (instancetype)init {
-    NSWindow *window = [[[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 650, 660)
+    NSWindow *window = [[[KuriSettingsWindow alloc] initWithContentRect:NSMakeRect(0, 0, 650, 660)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
         backing:NSBackingStoreBuffered defer:NO] autorelease];
     self = [super initWithWindow:window];
@@ -139,7 +168,7 @@ static NSString *settingsString(id value) {
 - (NSStackView *)addSection:(NSString *)name to:(NSStackView *)sections {
     NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 16);
     row.alignment = NSLayoutAttributeTop;
-    NSTextField *heading = [NSTextField labelWithString:name];
+    NSTextField *heading = [NSTextField wrappingLabelWithString:name];
     heading.font = [NSFont boldSystemFontOfSize:14];
     heading.alignment = NSTextAlignmentRight;
     [row addArrangedSubview:heading];
@@ -195,6 +224,10 @@ static NSString *settingsString(id value) {
     inSection:(NSStackView *)section {
     NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
     NSTextField *label = settingsItemLabel(name);
+    if ([identifier isEqualToString:@"check_seconds"]) {
+        label = settingsLabel(name, NSColor.labelColor);
+        label.font = settingsItemFont();
+    }
     NSTextField *field = [[[NSTextField alloc] initWithFrame:NSZeroRect] autorelease];
     [field setAccessibilityLabel:name];
     field.identifier = identifier;
@@ -211,9 +244,8 @@ static NSString *settingsString(id value) {
 }
 
 - (void)build {
-    NSStackView *body = nil;
-    NSScrollView *scroll = settingsScroll(&body, 24, 9, NSNoBorder);
-    [self.window setContentView:scroll];
+    NSStackView *body = settingsStack(NSUserInterfaceLayoutOrientationVertical, 4);
+    self.window.contentView = body;
     self.problem = settingsLabel(@"", NSColor.systemRedColor);
     self.problem.hidden = YES;
     addFullWidth(body, self.problem);
@@ -221,8 +253,18 @@ static NSString *settingsString(id value) {
     self.retry.hidden = YES;
     [body addArrangedSubview:self.retry];
 
-    NSStackView *sections = settingsStack(NSUserInterfaceLayoutOrientationVertical, 24);
-    addFullWidth(body, sections);
+    self.tabs = [[[NSTabView alloc] initWithFrame:NSZeroRect] autorelease];
+    self.tabs.tabViewType = NSNoTabsNoBorder;
+    self.tabs.drawsBackground = NO;
+    addFullWidth(body, self.tabs);
+    NSToolbar *toolbar = [[[NSToolbar alloc] initWithIdentifier:@"KuriSettingsTabs"] autorelease];
+    toolbar.delegate = self;
+    toolbar.displayMode = NSToolbarDisplayModeIconAndLabel;
+    self.window.toolbarStyle = NSWindowToolbarStylePreference;
+    self.window.toolbar = toolbar;
+    self.window.autorecalculatesKeyViewLoop = YES;
+
+    NSStackView *sections = [self addTab:@"General"];
     NSStackView *section = [self addSection:@"General" to:sections];
     [self addLoginItemToSection:section];
     self.autoStart = [self checkbox:@"Start the reverse proxy when kuri opens" identifier:@"auto_start" inSection:section];
@@ -251,6 +293,7 @@ static NSString *settingsString(id value) {
     [contextScroll.heightAnchor constraintEqualToConstant:145].active = YES;
     addFullWidth(section, contextScroll);
 
+    sections = [self addTab:@"Network"];
     section = [self addSection:@"Server" to:sections];
     [section addArrangedSubview:settingsItemLabel(@"Host")];
     [self addDescription:@"If another service uses port 80, choose a different port. To keep using port 80, configure that service to forward requests to kuri's new port."
@@ -261,6 +304,7 @@ static NSString *settingsString(id value) {
     self.serverError.hidden = YES;
     addFullWidth(section, self.serverError);
     [section addArrangedSubview:[self button:@"Save Server Settings" action:@selector(saveServer:)]];
+    [section setCustomSpacing:18 afterView:section.arrangedSubviews.lastObject];
     [section addArrangedSubview:settingsItemLabel(@"Domain Styles")];
     for (NSString *style in @[@"explicit_context", @"explicit_port", @"current_context"]) {
         NSButton *button = [self checkbox:@"" identifier:style inSection:section];
@@ -280,6 +324,12 @@ static NSString *settingsString(id value) {
     [self.trigger setAccessibilityLabel:@"Start the keep-alive timer from"];
     [self.controls addObject:self.trigger];
     [section addArrangedSubview:self.trigger];
+    [section setCustomSpacing:18 afterView:self.trigger];
+    [section addArrangedSubview:settingsItemLabel(@"Auto Healing")];
+    [self addDescription:@"Check open port forwards at regular intervals. If a reusable connection fails, kuri tries to restore it." to:section];
+    self.autoHealing = [self checkbox:@"Enable auto healing" identifier:@"auto_healing" inSection:section];
+    [self field:@"Connection check interval" identifier:@"check_seconds" width:72 unit:@"seconds" inSection:section];
+    [section setCustomSpacing:18 afterView:section.arrangedSubviews.lastObject];
     [section addArrangedSubview:settingsItemLabel(@"Port Range")];
     [self addDescription:@"kuri uses ports in this range for port forwarding. If no port is available, kuri closes its oldest open port forward to make room for a new one, even when keep-alive is enabled."
                       to:section];
@@ -289,6 +339,13 @@ static NSString *settingsString(id value) {
     self.forwardError.hidden = YES;
     addFullWidth(section, self.forwardError);
     [section addArrangedSubview:[self button:@"Save Port Forwarding Settings" action:@selector(saveForward:)]];
+    sections = [self addTab:@"About"];
+    [self addAppInfoTo:sections];
+    section = [self addSection:@"Settings Import/Export" to:sections];
+    NSStackView *transfer = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 8);
+    [transfer addArrangedSubview:[self button:@"Import settings" action:@selector(openImport:)]];
+    [transfer addArrangedSubview:[self button:@"Export settings" action:@selector(openExport:)]];
+    [section addArrangedSubview:transfer];
     section = [self addSection:@"Logs" to:sections];
     NSStackView *logs = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 8);
     [logs addArrangedSubview:[NSButton buttonWithTitle:@"Show Logs" target:self action:@selector(showLogs:)]];
@@ -296,7 +353,73 @@ static NSString *settingsString(id value) {
     [section addArrangedSubview:logs];
     section = [self addSection:@"Reset" to:sections];
     [section addArrangedSubview:[self button:@"Reset Settings..." action:@selector(reset:)]];
+    [self selectTab:@"General"];
     [self updateControls];
+}
+
+- (NSStackView *)addTab:(NSString *)title {
+    NSStackView *sections = nil;
+    NSTabViewItem *item = [[[NSTabViewItem alloc] initWithIdentifier:title] autorelease];
+    item.label = title;
+    item.view = settingsScroll(&sections, 24, 24, NSNoBorder);
+    [self.tabs addTabViewItem:item];
+    return sections;
+}
+
+- (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
+    return @[@"General", @"Network", @"About"];
+}
+
+- (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar { return [self toolbarAllowedItemIdentifiers:toolbar]; }
+- (NSArray *)toolbarSelectableItemIdentifiers:(NSToolbar *)toolbar { return [self toolbarAllowedItemIdentifiers:toolbar]; }
+
+- (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSString *)identifier
+    willBeInsertedIntoToolbar:(BOOL)inserted {
+    NSString *symbol = @{@"General": @"gearshape", @"Network": @"network", @"About": @"info.circle"}[identifier];
+    NSToolbarItem *item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+    item.label = identifier;
+    item.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:identifier];
+    item.target = self;
+    item.action = @selector(changeTab:);
+    return item;
+}
+
+- (void)changeTab:(NSToolbarItem *)item { [self selectTab:item.itemIdentifier]; }
+
+- (void)selectTab:(NSString *)identifier {
+    [self.tabs selectTabViewItemWithIdentifier:identifier];
+    self.window.toolbar.selectedItemIdentifier = identifier;
+}
+
+- (void)addAppInfoTo:(NSStackView *)sections {
+    NSBundle *bundle = NSBundle.mainBundle;
+    NSString *name = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"kuri";
+    NSString *version = [bundle objectForInfoDictionaryKey:@"KuriVersion"];
+    NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 24);
+    row.alignment = NSLayoutAttributeTop;
+    NSImageView *icon = [NSImageView imageViewWithImage:NSApp.applicationIconImage];
+    icon.imageScaling = NSImageScaleProportionallyUpOrDown;
+    [icon.widthAnchor constraintEqualToConstant:96].active = YES;
+    [icon.heightAnchor constraintEqualToConstant:96].active = YES;
+    [row addArrangedSubview:icon];
+    NSStackView *info = settingsStack(NSUserInterfaceLayoutOrientationVertical, 6);
+    NSTextField *appName = settingsItemLabel(name);
+    appName.font = [NSFont boldSystemFontOfSize:17];
+    [info addArrangedSubview:appName];
+    if (version.length) {
+        [info addArrangedSubview:settingsLabel([@"Version " stringByAppendingString:version], NSColor.secondaryLabelColor)];
+    }
+    NSButton *repository = [NSButton buttonWithTitle:@"Repository" target:self action:@selector(openRepository:)];
+    repository.bordered = NO;
+    repository.attributedTitle = [[[NSAttributedString alloc] initWithString:@"Repository"
+        attributes:@{NSForegroundColorAttributeName: NSColor.linkColor}] autorelease];
+    [info addArrangedSubview:repository];
+    [row addArrangedSubview:info];
+    addFullWidth(sections, row);
+}
+
+- (void)openRepository:(id)sender {
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/crmin/kuri"]];
 }
 
 - (void)submit:(NSDictionary *)edit {
@@ -321,21 +444,25 @@ static NSString *settingsString(id value) {
 - (void)updateControls {
     for (NSControl *control in self.controls) {
         BOOL reset = [control isKindOfClass:[NSButton class]] && control.action == @selector(reset:);
-        control.enabled = !self.busy && self.loaded && (!self.corrupt || reset);
+        control.enabled = !self.busy && !self.dialog && self.loaded && (!self.corrupt || reset);
     }
     self.fields[@"minutes"].enabled = self.fields[@"minutes"].enabled && self.keepAlive.state == NSControlStateValueOn;
+    self.fields[@"check_seconds"].enabled = self.fields[@"check_seconds"].enabled && self.autoHealing.state == NSControlStateValueOn;
     self.trigger.enabled = self.trigger.enabled && self.keepAlive.state == NSControlStateValueOn;
     for (NSStackView *row in self.contexts.arrangedSubviews) {
         NSSwitch *toggle = (NSSwitch *)row.arrangedSubviews.lastObject;
-        toggle.enabled = self.loaded && !self.busy && !self.corrupt;
+        toggle.enabled = self.loaded && !self.busy && !self.corrupt && !self.dialog;
+        NSButton *alias = (NSButton *)row.arrangedSubviews[1];
+        alias.enabled = toggle.enabled;
     }
+    self.aliasSave.enabled = !self.busy;
+    self.transferConfirm.enabled = !self.busy && [self selectedTransferFields].count > 0;
 }
 
 - (NSDictionary *)draft {
     NSMutableDictionary *draft = [NSMutableDictionary dictionary];
     for (NSString *key in self.fields) {
         NSTextField *field = self.fields[key];
-        if (field == self.fields[@"minutes"] && self.keepAlive.state != NSControlStateValueOn) continue;
         NSString *text = field.currentEditor ? field.currentEditor.string : field.stringValue;
         if (![text isEqualToString:self.saved[key] ?: @""] || ([key isEqual:@"port"] && self.portDraftUnapplied))
             draft[key] = text;
@@ -344,14 +471,18 @@ static NSString *settingsString(id value) {
 }
 
 - (void)applyResponse:(NSDictionary *)response {
-    NSDictionary *pending = self.pending;
+    NSDictionary *pending = [[self.pending retain] autorelease];
+    if (pending[@"transfer_operation"]) {
+        [self applyTransferResponse:response pending:pending];
+        return;
+    }
     NSDictionary *draft = [self draft];
     BOOL saved = [response[@"saved"] boolValue];
     BOOL applied = [response[@"applied"] boolValue];
     NSString *portError = response[@"port_error"];
     NSString *error = response[@"error"];
     BOOL hostEdit = pending[@"domain"] || pending[@"port"];
-    BOOL forwardEdit = pending[@"minutes"] || pending[@"min_port"] || pending[@"max_port"];
+    BOOL forwardEdit = pending[@"minutes"] || pending[@"min_port"] || pending[@"max_port"] || pending[@"check_seconds"];
     BOOL reset = [pending[@"reset"] boolValue];
     if (pending[@"port"] || (reset && applied)) self.portDraftUnapplied = portError.length != 0;
     if (portError.length || hostEdit || reset) {
@@ -373,22 +504,27 @@ static NSString *settingsString(id value) {
         NSDictionary *server = cfg[@"server"], *forward = cfg[@"port_forward"];
         self.autoStart.state = [general[@"auto_start_proxy"] boolValue];
         self.keepAlive.state = [forward[@"keep_alive_enabled"] boolValue];
+        self.autoHealing.state = [forward[@"auto_healing_enabled"] ?: @YES boolValue];
         [self.trigger selectItemAtIndex:[forward[@"keep_alive_trigger"] isEqual:@"forward_opened"] ? 1 : 0];
         self.saved = @{
             @"domain": settingsString(server[@"domain"]), @"port": settingsString(server[@"port"]),
             @"minutes": settingsString(forward[@"keep_alive_minutes"]),
+            @"check_seconds": settingsString(forward[@"connection_check_interval_seconds"] ?: @10),
             @"min_port": settingsString(forward[@"min_port"]), @"max_port": settingsString(forward[@"max_port"]),
         };
         for (NSString *key in self.fields) {
             BOOL restoredPort = [key isEqual:@"port"] && portError.length != 0;
-            BOOL acceptSaved = (saved && pending[key] && !restoredPort) || (reset && applied) ||
-                ([key isEqual:@"minutes"] && self.keepAlive.state == NSControlStateValueOff);
+            BOOL disabledByEdit = ([key isEqual:@"minutes"] && pending[@"keep_alive"] && self.keepAlive.state == NSControlStateValueOff) ||
+                ([key isEqual:@"check_seconds"] && pending[@"auto_healing"] && self.autoHealing.state == NSControlStateValueOff);
+            BOOL acceptSaved = (saved && ((pending[key] && !restoredPort) || disabledByEdit)) || (reset && applied);
             NSString *text = restoredPort && pending[key] ? pending[key] :
                 (!pending || acceptSaved) ? self.saved[key] : draft[key] ?: self.saved[key];
             self.fields[key].stringValue = text ?: @"";
         }
 
         self.settingsPath = settingsString(kube[@"config_path"]);
+        self.kubeconfigFingerprint = settingsString(response[@"kubeconfig_fingerprint"]);
+        self.contextAliases = kube[@"context_aliases"][self.settingsPath] ?: @{};
         NSString *displayPath = self.settingsPath;
         if (displayPath.length > 33) {
             NSRange head = [displayPath rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, 15)];
@@ -412,7 +548,7 @@ static NSString *settingsString(id value) {
         self.problem.toolTip = error;
         self.retry.hidden = NO;
     } else {
-        self.retry.hidden = ![response[@"apply_pending"] boolValue] || portError.length || ![notice isEqual:response[@"runtime_warning"]];
+        self.retry.hidden = ![response[@"apply_pending"] boolValue] || (!portError.length && ![notice isEqual:response[@"runtime_warning"]]);
         self.problem.toolTip = notice;
     }
     self.problem.stringValue = notice ?: @"";
@@ -421,7 +557,18 @@ static NSString *settingsString(id value) {
     self.busy = NO;
     self.pending = nil;
     [self updateControls];
-    if (portError.length) [self reveal:self.serverError];
+    if (pending[@"context_aliases"] && self.aliasTarget) {
+        if (saved) {
+            [self closeDialog:nil];
+        } else {
+            self.aliasError.stringValue = error ?: @"Could not save the context alias.";
+            self.aliasError.hidden = NO;
+        }
+    }
+    if (portError.length || (error.length && !saved && (hostEdit || forwardEdit))) {
+        [self selectTab:@"Network"];
+        [self reveal:(hostEdit || portError.length) ? self.serverError : self.forwardError];
+    }
     if (self.closeAfterSave) {
         BOOL quit = self.quitAfterSave;
         self.closeAfterSave = NO;
@@ -442,10 +589,26 @@ static NSString *settingsString(id value) {
     }
     for (NSString *name in names) {
         NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 9);
+        NSStackView *names = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 5);
         NSTextField *title = settingsLabel(name, NSColor.labelColor);
         title.font = settingsItemFont();
         title.lineBreakMode = NSLineBreakByCharWrapping;
-        [row addArrangedSubview:title];
+        [names addArrangedSubview:title];
+        NSString *alias = self.contextAliases[name];
+        if (alias.length && ![alias isEqualToString:name]) {
+            NSTextField *aliasLabel = settingsLabel([NSString stringWithFormat:@"(%@)", alias], NSColor.secondaryLabelColor);
+            aliasLabel.lineBreakMode = NSLineBreakByCharWrapping;
+            [names addArrangedSubview:aliasLabel];
+        }
+        [row addArrangedSubview:names];
+        NSButton *more = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"ellipsis.circle" accessibilityDescription:nil]
+            target:self action:@selector(openAlias:)];
+        more.bordered = NO;
+        more.identifier = name;
+        more.toolTip = @"Edit context alias";
+        [more setAccessibilityLabel:[@"Edit alias for " stringByAppendingString:name]];
+        [more.widthAnchor constraintEqualToConstant:22].active = YES;
+        [row addArrangedSubview:more];
         NSSwitch *toggle = [[[NSSwitch alloc] initWithFrame:NSZeroRect] autorelease];
         [toggle.widthAnchor constraintEqualToConstant:42].active = YES;
         [toggle setAccessibilityLabel:name];
@@ -455,6 +618,278 @@ static NSString *settingsString(id value) {
         toggle.action = @selector(changeContext:);
         [row addArrangedSubview:toggle];
         addFullWidth(self.contexts, row);
+    }
+}
+
+- (NSStackView *)createDialog:(NSString *)title size:(NSSize)size {
+    NSWindow *window = [[[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, size.width, size.height)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO] autorelease];
+    window.title = title;
+    window.delegate = self;
+    window.releasedWhenClosed = NO;
+    self.dialog = window;
+    NSView *content = window.contentView;
+    NSStackView *stack = settingsStack(NSUserInterfaceLayoutOrientationVertical, 10);
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:22],
+        [stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-22],
+        [stack.topAnchor constraintEqualToAnchor:content.topAnchor constant:20],
+        [stack.bottomAnchor constraintLessThanOrEqualToAnchor:content.bottomAnchor constant:-20],
+    ]];
+    return stack;
+}
+
+- (void)showDialog {
+    [self.dialog center];
+    [self.window addChildWindow:self.dialog ordered:NSWindowAbove];
+    [self updateControls];
+    [self.dialog makeKeyAndOrderFront:nil];
+}
+
+- (NSStackView *)dialogActions:(NSString *)title action:(SEL)action in:(NSStackView *)stack {
+    NSStackView *row = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 8);
+    NSView *space = [[[NSView alloc] initWithFrame:NSZeroRect] autorelease];
+    [row addArrangedSubview:space];
+    NSButton *cancel = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(closeDialog:)];
+    cancel.keyEquivalent = @"\e";
+    [row addArrangedSubview:cancel];
+    NSButton *confirm = [NSButton buttonWithTitle:title target:self action:action];
+    confirm.keyEquivalent = @"\r";
+    [row addArrangedSubview:confirm];
+    addFullWidth(stack, row);
+    return row;
+}
+
+- (void)openAlias:(NSButton *)sender {
+    if (self.dialog || self.busy || !self.kubeconfigFingerprint.length) return;
+    NSString *name = sender.identifier;
+    self.aliasTarget = @{@"name": name, @"config_path": self.settingsPath, @"fingerprint": self.kubeconfigFingerprint};
+    NSStackView *stack = [self createDialog:name size:NSMakeSize(460, 230)];
+    [stack addArrangedSubview:settingsItemLabel(@"Alias")];
+    [self addDescription:@"Use this alias in the context part of a service domain." to:stack];
+    NSString *alias = self.contextAliases[name];
+    if (alias.length) [self addDescription:[@"Current alias: " stringByAppendingString:alias] to:stack];
+    self.aliasField = [NSTextField textFieldWithString:name];
+    [self.aliasField setAccessibilityLabel:@"Alias"];
+    addFullWidth(stack, self.aliasField);
+    self.aliasError = settingsLabel(@"", NSColor.systemRedColor);
+    self.aliasError.hidden = YES;
+    addFullWidth(stack, self.aliasError);
+    self.aliasSave = (NSButton *)[self dialogActions:@"Save" action:@selector(saveAlias:) in:stack].arrangedSubviews.lastObject;
+    [self showDialog];
+    [self.dialog makeFirstResponder:self.aliasField];
+}
+
+- (void)saveAlias:(id)sender {
+    if (self.busy || !self.aliasTarget) return;
+    if (![self.dialog makeFirstResponder:nil]) return;
+    self.aliasError.hidden = YES;
+    [self submit:@{@"context_aliases": @{@"config_path": self.aliasTarget[@"config_path"],
+        @"fingerprint": self.aliasTarget[@"fingerprint"], @"aliases": @{self.aliasTarget[@"name"]: self.aliasField.stringValue}}}];
+}
+
+- (void)closeDialog:(id)sender {
+    if (!self.dialog || self.busy) return;
+    [self.window removeChildWindow:self.dialog];
+    [self.dialog orderOut:nil];
+    self.dialog.delegate = nil;
+    self.dialog = nil;
+    self.aliasTarget = nil;
+    self.aliasField = nil;
+    self.aliasError = nil;
+    self.aliasSave = nil;
+    self.transferChoices = nil;
+    self.transferConfirm = nil;
+    self.transferError = nil;
+    self.transferPreview = nil;
+    self.transferPath = nil;
+    [self updateControls];
+    [self.window makeKeyAndOrderFront:nil];
+}
+
+static NSArray *settingsTransferGroups(void) {
+    return @[
+        @[@"Server", @[@"domain", @"Service Domain"], @[@"port", @"Port"], @[@"domain_styles", @"Domain Styles"]],
+        @[@"Port Forwarding", @[@"keep_alive_enabled", @"Enable port forwarding keep-alive"],
+            @[@"keep_alive_minutes", @"Keep-alive duration"], @[@"keep_alive_trigger", @"Start the keep-alive timer from"],
+            @[@"auto_healing_enabled", @"Enable auto healing"], @[@"connection_check_interval_seconds", @"Connection check interval"],
+            @[@"port_range", @"Port Range"]],
+        @[@"Kubernetes", @[@"context_aliases", @"Context Aliases"]],
+    ];
+}
+
+- (void)openImport:(id)sender {
+    if (self.dialog || self.busy) return;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"yaml"]];
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK) [self previewImport:panel.URL.path keepingSelection:nil];
+    }];
+}
+
+- (void)previewImport:(NSString *)path keepingSelection:(NSArray *)selection {
+    if (!path.length || [path.pathExtension caseInsensitiveCompare:@"yaml"] != NSOrderedSame) {
+        [self notice:@"Choose a settings file with the .yaml extension."];
+        return;
+    }
+    self.transferPath = path;
+    NSMutableDictionary *request = [NSMutableDictionary dictionaryWithDictionary:@{@"transfer_operation": @"preview_import", @"path": path}];
+    if (selection) request[@"fields"] = selection;
+    [self submit:request];
+}
+
+- (void)openExport:(id)sender {
+    if (self.dialog || self.busy) return;
+    [self openTransferDialog:NO keepingSelection:nil];
+}
+
+- (void)openTransferDialog:(BOOL)importing keepingSelection:(NSArray *)selection {
+    NSString *action = importing ? @"Import" : @"Export";
+    NSStackView *stack = [self createDialog:[action stringByAppendingString:@" settings"] size:NSMakeSize(445, 575)];
+    NSString *description = importing ? @"Choose the settings to import from this file." : @"Choose the settings to export to a YAML file.";
+    if (selection) description = @"The active kubeconfig changed. Review your selection before importing.";
+    [self addDescription:description to:stack];
+    NSArray *fields = self.transferPreview[@"fields"];
+    self.transferChoices = [NSMutableDictionary dictionary];
+    for (NSArray *group in settingsTransferGroups()) {
+        [stack addArrangedSubview:settingsItemLabel(group.firstObject)];
+        NSStackView *choices = settingsStack(NSUserInterfaceLayoutOrientationVertical, 2);
+        for (NSUInteger i = 1; i < group.count; i++) {
+            NSArray *item = group[i];
+            NSButton *checkbox = [NSButton checkboxWithTitle:item[1] target:self action:@selector(changeTransferSelection:)];
+            checkbox.enabled = !importing || [fields containsObject:item[0]];
+            checkbox.state = checkbox.enabled && (!selection || [selection containsObject:item[0]]) ? NSControlStateValueOn : NSControlStateValueOff;
+            self.transferChoices[item[0]] = checkbox;
+            [choices addArrangedSubview:checkbox];
+        }
+        addFullWidth(stack, choices);
+    }
+    NSStackView *bulk = settingsStack(NSUserInterfaceLayoutOrientationHorizontal, 8);
+    [bulk addArrangedSubview:[NSButton buttonWithTitle:@"Select All" target:self action:@selector(selectAllTransfer:)]];
+    [bulk addArrangedSubview:[NSButton buttonWithTitle:@"Deselect All" target:self action:@selector(deselectAllTransfer:)]];
+    [stack addArrangedSubview:bulk];
+    self.transferError = settingsLabel(@"", NSColor.systemRedColor);
+    self.transferError.hidden = YES;
+    addFullWidth(stack, self.transferError);
+    self.transferConfirm = (NSButton *)[self dialogActions:action action:@selector(confirmTransfer:) in:stack].arrangedSubviews.lastObject;
+    [self showDialog];
+}
+
+- (NSArray *)selectedTransferFields {
+    NSMutableArray *fields = [NSMutableArray array];
+    for (NSString *field in self.transferChoices) {
+        NSButton *button = self.transferChoices[field];
+        if (button.enabled && button.state == NSControlStateValueOn) [fields addObject:field];
+    }
+    return fields;
+}
+
+- (void)changeTransferSelection:(id)sender { [self updateControls]; }
+
+- (void)setTransferSelection:(BOOL)on {
+    if (self.busy) return;
+    for (NSButton *button in self.transferChoices.allValues) {
+        button.state = on && button.enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    [self changeTransferSelection:nil];
+}
+
+- (void)selectAllTransfer:(id)sender { [self setTransferSelection:YES]; }
+- (void)deselectAllTransfer:(id)sender { [self setTransferSelection:NO]; }
+
+- (NSDictionary *)transferredDraftFields:(NSDictionary *)pending {
+    NSArray *fields = pending[@"fields"];
+    NSDictionary *transfer = pending[@"transfer"];
+    NSDictionary *server = transfer[@"server"], *forward = transfer[@"port_forward"];
+    NSMutableDictionary *draft = [NSMutableDictionary dictionary];
+    for (NSString *key in @[@"domain", @"port"]) {
+        if ([fields containsObject:key] && server[key]) draft[key] = settingsString(server[key]);
+    }
+    if ([fields containsObject:@"keep_alive_minutes"] && forward[@"keep_alive_minutes"])
+        draft[@"minutes"] = settingsString(forward[@"keep_alive_minutes"]);
+    if ([fields containsObject:@"connection_check_interval_seconds"] && forward[@"connection_check_interval_seconds"])
+        draft[@"check_seconds"] = settingsString(forward[@"connection_check_interval_seconds"]);
+    if ([fields containsObject:@"port_range"]) {
+        for (NSString *key in @[@"min_port", @"max_port"]) {
+            if (forward[key]) draft[key] = settingsString(forward[key]);
+        }
+    }
+    return draft;
+}
+
+- (void)confirmTransfer:(id)sender {
+    NSArray *fields = [self selectedTransferFields];
+    if (self.busy || !fields.count) return;
+    self.transferError.hidden = YES;
+    if (!self.transferPreview) {
+        NSSavePanel *panel = [NSSavePanel savePanel];
+        panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"yaml"]];
+        panel.nameFieldStringValue = @"kuri-settings.yaml";
+        const char *launchHome = getenv("HOME");
+        NSString *home = launchHome ? [NSString stringWithUTF8String:launchHome] : NSHomeDirectory();
+        panel.directoryURL = [NSURL fileURLWithPath:[home stringByAppendingPathComponent:@"Documents"] isDirectory:YES];
+        [panel beginSheetModalForWindow:self.dialog completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK)
+                [self submit:@{@"transfer_operation": @"export", @"path": panel.URL.path, @"fields": fields}];
+        }];
+        return;
+    }
+    NSDictionary *pending = @{@"transfer_operation": @"import", @"fields": fields,
+        @"transfer": self.transferPreview[@"transfer"],
+        @"kubeconfig_path": self.transferPreview[@"kubeconfig_path"] ?: @"",
+        @"kubeconfig_fingerprint": self.transferPreview[@"kubeconfig_fingerprint"] ?: @""};
+    NSDictionary *draft = [self draft];
+    for (NSString *key in [self transferredDraftFields:pending]) {
+        if (draft[key]) {
+            NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+            alert.messageText = @"Replace unsaved changes?";
+            alert.informativeText = @"Import will replace unsaved values for the selected settings.";
+            [alert addButtonWithTitle:@"Import"];
+            [alert addButtonWithTitle:@"Cancel"].keyEquivalent = @"\e";
+            [alert beginSheetModalForWindow:self.dialog completionHandler:^(NSModalResponse result) {
+                if (result == NSAlertFirstButtonReturn) [self submit:pending];
+            }];
+            return;
+        }
+    }
+    [self submit:pending];
+}
+
+- (void)applyTransferResponse:(NSDictionary *)response pending:(NSDictionary *)pending {
+    NSString *operation = pending[@"transfer_operation"];
+    NSString *error = response[@"error"];
+    self.busy = NO;
+    self.pending = nil;
+    [self updateControls];
+    if ([operation isEqualToString:@"preview_import"]) {
+        if (error.length) {
+            [self notice:error];
+        } else {
+            self.transferPreview = response;
+            [self openTransferDialog:YES keepingSelection:pending[@"fields"]];
+        }
+        return;
+    }
+    if ([response[@"refresh"] boolValue]) {
+        NSString *path = [[self.transferPath retain] autorelease];
+        [self closeDialog:nil];
+        [self previewImport:path keepingSelection:pending[@"fields"]];
+        return;
+    }
+    if (error.length) {
+        self.transferError.stringValue = error;
+        self.transferError.hidden = NO;
+        return;
+    }
+    [self closeDialog:nil];
+    if (response[@"settings"]) {
+        self.pending = [self transferredDraftFields:pending];
+        [self applyResponse:response[@"settings"]];
     }
 }
 
@@ -510,6 +945,7 @@ static NSString *settingsString(id value) {
     NSMutableDictionary *edit = [@{@"min_port": self.fields[@"min_port"].stringValue,
                                   @"max_port": self.fields[@"max_port"].stringValue} mutableCopy];
     if (self.keepAlive.state == NSControlStateValueOn) edit[@"minutes"] = self.fields[@"minutes"].stringValue;
+    if (self.autoHealing.state == NSControlStateValueOn) edit[@"check_seconds"] = self.fields[@"check_seconds"].stringValue;
     [self submit:edit];
     [edit release];
 }
@@ -580,7 +1016,13 @@ static NSString *settingsString(id value) {
 
 - (void)confirmClose:(BOOL)quit {
     if (self.busy || self.confirmingClose || self.window.attachedSheet) return;
-    NSDictionary *draft = [self draft];
+    if (self.dialog) {
+        [self.dialog makeKeyAndOrderFront:nil];
+        return;
+    }
+    NSMutableDictionary *draft = [[[self draft] mutableCopy] autorelease];
+    if (self.keepAlive.state != NSControlStateValueOn) [draft removeObjectForKey:@"minutes"];
+    if (self.autoHealing.state != NSControlStateValueOn) [draft removeObjectForKey:@"check_seconds"];
     if (!draft.count) {
         [self dismiss:quit];
         return;
@@ -605,6 +1047,10 @@ static NSString *settingsString(id value) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
+    if (sender == self.dialog) {
+        [self closeDialog:nil];
+        return NO;
+    }
     [self confirmClose:NO];
     return NO;
 }

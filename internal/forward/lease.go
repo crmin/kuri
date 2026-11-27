@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,10 +16,18 @@ type Lease struct {
 	Connected   time.Time
 
 	host      string
+	probeHost atomic.Pointer[string]
 	tunnel    Tunnel
 	transport *http.Transport
 	dialMu    sync.RWMutex
 	closed    bool
+}
+
+func (lease *Lease) probeAuthority() string {
+	if host := lease.probeHost.Load(); host != nil {
+		return *host
+	}
+	return lease.host
 }
 
 func newLease(destination Destination, host string, port int, tunnel Tunnel) *Lease {
@@ -73,7 +82,7 @@ func probeHTTP(ctx context.Context, lease *Lease) error {
 	if err != nil {
 		return err
 	}
-	req.Host = lease.host
+	req.Host = lease.probeAuthority()
 	transport := http.Transport{DialContext: lease.dial, DisableKeepAlives: true}
 	response, err := transport.RoundTrip(req)
 	if err == nil {

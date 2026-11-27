@@ -58,7 +58,7 @@ func (app *App) RunActivated(ctx context.Context, sockets launchd.Sockets, eager
 	eager = eager && !controlRequestQueued(sockets.Control) && allowPassive()
 	claims := make(chan activationRequest)
 	chosen := make(chan struct{})
-	info := reply{State: State{Port: port}, ProxyPause: true}
+	info := reply{State: State{Port: port, SettingsSchema: settings.SettingsSchemaVersion}, ProxyPause: true}
 	if suppressed {
 		info.PortChange = change.ID
 	}

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/crmin/kuri/internal/daemon"
+	"github.com/crmin/kuri/internal/forward"
 	"github.com/crmin/kuri/internal/launchd"
 	"github.com/crmin/kuri/internal/settings"
 )
@@ -20,9 +21,11 @@ type testSettingsServer struct {
 	state        daemon.State
 	blockedPort  int
 	policyErr    error
+	schemaErr    error
 	registration launchd.Registration
 	ownedPort    int
 	start        func(context.Context) (int, error)
+	beforeApply  func(settings.Config, string) error
 	states       []daemon.State
 }
 
@@ -33,7 +36,7 @@ func (s *testSettingsServer) State(context.Context) (daemon.State, error) {
 	return s.state, nil
 }
 
-func (s *testSettingsServer) ApplySettings(_ context.Context, state daemon.State, hash string, retainPort bool) (daemon.State, error) {
+func (s *testSettingsServer) ApplySettings(_ context.Context, state daemon.State, hash string, retainPort bool, kubeconfig ...string) (daemon.State, error) {
 	cfg, err := s.store.Read()
 	if err != nil {
 		return daemon.State{}, err
@@ -44,10 +47,22 @@ func (s *testSettingsServer) ApplySettings(_ context.Context, state daemon.State
 	if retainPort {
 		cfg.Server.Port = state.Port
 	}
+	if s.beforeApply != nil {
+		var expected string
+		if len(kubeconfig) > 0 {
+			expected = kubeconfig[0]
+		}
+		if err := s.beforeApply(cfg, expected); err != nil {
+			return daemon.State{}, err
+		}
+	}
 	if cfg.Server.Port == s.blockedPort {
 		return daemon.State{}, daemon.ErrPortOccupied
 	}
 	s.state.Port, s.state.ProxyFingerprint = cfg.Server.Port, cfg.ProxyFingerprint()
+	if len(kubeconfig) > 0 && kubeconfig[0] != "" {
+		s.state.KubeconfigFingerprint = kubeconfig[0]
+	}
 	return s.state, nil
 }
 
@@ -82,6 +97,96 @@ func (*testSettingsServer) HandoffDirectForeground(context.Context, daemon.State
 	return errors.New("unexpected direct foreground handoff")
 }
 func (s *testSettingsServer) EnsurePolicySupport(context.Context) error { return s.policyErr }
+func (s *testSettingsServer) CheckSettingsSchema(context.Context, daemon.State, int) error {
+	return s.schemaErr
+}
+
+func TestGuardedPortRestartConfirmation(t *testing.T) {
+	cfg := settings.Defaults(t.TempDir())
+	approved := strings.Repeat("a", 64)
+	cfg.SetPendingKubeconfigFingerprint(approved)
+	app := &testSettingsServer{state: daemon.State{PID: 123, Mode: "foreground", ForegroundOwner: 23,
+		Port: cfg.Server.Port, ProxyFingerprint: cfg.ProxyFingerprint(), KubeconfigFingerprint: strings.Repeat("b", 64)}}
+	if err := confirmServingSettings(t.Context(), app, cfg); !errors.Is(err, daemon.ErrKubeconfigChanged) {
+		t.Fatalf("confirmed settings on another kubeconfig: %v", err)
+	}
+	if err := waitForForegroundRestart(t.Context(), app, app.state, cfg); !errors.Is(err, daemon.ErrKubeconfigChanged) {
+		t.Fatalf("confirmed foreground handoff on another kubeconfig: %v", err)
+	}
+	app.state.KubeconfigFingerprint = approved
+	if err := confirmServingSettings(t.Context(), app, cfg); err != nil {
+		t.Fatalf("rejected approved kubeconfig: %v", err)
+	}
+}
+
+func TestLegacyDaemonSettingsCompatibility(t *testing.T) {
+	home := t.TempDir()
+	store := settings.NewStore(home)
+	defaults, err := store.Ensure(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &testSettingsServer{store: store, state: daemon.State{
+		PID: 123, Port: defaults.Server.Port, ProxyFingerprint: defaults.ProxyFingerprint(),
+	}}
+	if result := updateSettings(t.Context(), app, home, settings.Edit{AutoHealing: new(false)}); result.saved || result.err == nil {
+		t.Fatalf("old live process accepted new YAML: %+v", result)
+	}
+	app.state = daemon.State{}
+	app.schemaErr = errors.New("old activation")
+	if result := updateSettings(t.Context(), app, home, settings.Edit{CheckSeconds: new("3")}); result.saved || result.err == nil {
+		t.Fatalf("old activation process accepted new YAML: %+v", result)
+	}
+	if result := updateSettings(t.Context(), app, home, settings.Edit{Reset: true}); !result.saved || result.err != nil {
+		t.Fatalf("reset should retain old YAML compatibility: %+v", result)
+	}
+	raw, err := os.ReadFile(store.Path())
+	if err != nil || strings.Contains(string(raw), "auto_healing_enabled") || strings.Contains(string(raw), "connection_check_interval_seconds") {
+		t.Fatalf("default settings used new keys: %s %v", raw, err)
+	}
+}
+
+func TestAliasRequiresCompatibleSettingsSchema(t *testing.T) {
+	home := t.TempDir()
+	store := settings.NewStore(home)
+	path := home + "/config"
+	if err := os.WriteFile(path, []byte("apiVersion: v1\nkind: Config\ncontexts:\n- name: dev\n  context: {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, initial, err := store.Update(t.Context(), func(c *settings.Config) error {
+		c.Kubernetes.ConfigPath = path
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kube, _, err := forward.LoadKubernetes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &testSettingsServer{store: store, state: daemon.State{PID: 123, SettingsSchema: 1, Port: initial.Server.Port}}
+	edit := settings.Edit{ContextAliases: &settings.ContextAliasEdit{
+		ConfigPath: path, Fingerprint: kube.Fingerprint(), Aliases: map[string]string{"dev": "test"},
+	}}
+	if result := updateSettings(t.Context(), app, home, edit); result.saved || result.err == nil {
+		t.Fatalf("old daemon accepted an alias update: %+v", result)
+	}
+	if raw, err := os.ReadFile(store.Path()); err != nil || string(raw) != string(old) {
+		t.Fatalf("failed save changed the file: %v", err)
+	}
+	app.state.SettingsSchema = settings.SettingsSchemaVersion
+	app.state.ProxyFingerprint = initial.ProxyFingerprint()
+	if result := updateSettings(t.Context(), app, home, edit); !result.applied || result.err != nil {
+		t.Fatalf("save with a compatible daemon: %+v", result)
+	}
+	if cfg, err := store.Read(); err != nil || cfg.Kubernetes.Aliases()["dev"] != "test" {
+		t.Fatalf("alias was not saved: %+v %v", cfg, err)
+	}
+}
 
 func TestProxyRegistrationUpdateRefusesPendingPort(t *testing.T) {
 	home := t.TempDir()
