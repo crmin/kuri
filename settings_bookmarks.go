@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/crmin/kuri/internal/forward"
@@ -111,9 +113,16 @@ func bookmarkOptions(ctx context.Context, store settings.Store, req bookmarkRequ
 		return bookmarkFailure(err)
 	}
 	reply := bookmarkReply{KubeconfigPath: cfg.Kubernetes.ConfigPath, KubeconfigFingerprint: kube.Fingerprint()}
-	switch req.Operation {
-	case "contexts":
+	if req.Operation == "contexts" {
 		reply.Options = kube.ContextNames()
+		return reply
+	}
+	finish, err := startBookmarkCredentials(ctx, kube)
+	if err != nil {
+		return bookmarkFailure(err)
+	}
+	defer finish()
+	switch req.Operation {
 	case "namespaces":
 		reply.Options, err = kube.BookmarkNamespaces(ctx, req.Context)
 	case "services":
@@ -135,9 +144,30 @@ func bookmarkOptions(ctx context.Context, store settings.Store, req bookmarkRequ
 		slices.Sort(reply.Options)
 	}
 	if err != nil {
-		return bookmarkFailure(err)
+		return bookmarkLookupFailure(ctx, err)
 	}
 	return reply
+}
+
+func startBookmarkCredentials(ctx context.Context, kube *forward.Kubernetes) (func(), error) {
+	if err := kube.StartCredentials(os.TempDir(), false); err != nil {
+		return nil, err
+	}
+	// Removing the session directory stops the wrapper even while client-go
+	// is synchronously waiting for the exec plugin to exit.
+	closeSession := sync.OnceFunc(func() { _ = kube.StopCredentials() })
+	stop := context.AfterFunc(ctx, closeSession)
+	return func() {
+		stop()
+		closeSession()
+	}, nil
+}
+
+func bookmarkLookupFailure(ctx context.Context, err error) bookmarkReply {
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	return bookmarkFailure(err)
 }
 
 func bookmarkFailure(err error) bookmarkReply {
@@ -159,9 +189,14 @@ func addBookmark(ctx context.Context, store settings.Store, req bookmarkRequest)
 	if err != nil {
 		return bookmarkFailure(err)
 	}
-	ports, err := kube.BookmarkPorts(ctx, req.BookmarkTarget)
+	finish, err := startBookmarkCredentials(ctx, kube)
 	if err != nil {
 		return bookmarkFailure(err)
+	}
+	defer finish()
+	ports, err := kube.BookmarkPorts(ctx, req.BookmarkTarget)
+	if err != nil {
+		return bookmarkLookupFailure(ctx, err)
 	}
 	if _, err := route.ChooseServicePort(ports, route.Selector{PortName: req.PortName}); err != nil {
 		switch {

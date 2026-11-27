@@ -262,15 +262,15 @@ static BOOL copyServiceURL(NSString *url, NSPasteboard *clipboard) {
     return [clipboard setString:url forType:NSPasteboardTypeString];
 }
 
-@interface KuriBookmarkMenuView : KuriRecentMenuCanvas <NSSearchFieldDelegate>
+@interface KuriBookmarkMenuView : KuriRecentMenuCanvas <NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @property(nonatomic, assign) KuriPopover *owner;
 @property(nonatomic, retain) NSSearchField *search;
 @property(nonatomic, retain) NSBox *separator;
 @property(nonatomic, retain) NSScrollView *list;
+@property(nonatomic, retain) NSTableView *table;
 @property(nonatomic, retain) NSTextField *status;
 @property(nonatomic, copy) NSArray<NSDictionary *> *rows;
 @property(nonatomic, copy) NSArray<NSDictionary *> *visibleRows;
-@property(nonatomic, copy) NSArray<KuriPopoverButton *> *buttons;
 @property(nonatomic, retain) NSMutableDictionary<NSString *, NSUUID *> *feedback;
 @property(nonatomic, copy) NSString *message;
 @property(nonatomic) NSInteger focus;
@@ -299,7 +299,19 @@ static const CGFloat bookmarkListTop = 42;
     self.list.drawsBackground = NO;
     self.list.hasVerticalScroller = YES;
     self.list.autohidesScrollers = YES;
-    self.list.documentView = [[[KuriPopoverCanvas alloc] initWithFrame:NSZeroRect] autorelease];
+    self.table = [[[NSTableView alloc] initWithFrame:NSZeroRect] autorelease];
+    self.table.headerView = nil;
+    self.table.style = NSTableViewStylePlain;
+    self.table.rowHeight = menuRowHeight;
+    self.table.intercellSpacing = NSZeroSize;
+    self.table.backgroundColor = NSColor.clearColor;
+    self.table.selectionHighlightStyle = NSTableViewSelectionHighlightStyleNone;
+    self.table.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    self.table.autoresizingMask = NSViewWidthSizable;
+    [self.table addTableColumn:[[[NSTableColumn alloc] initWithIdentifier:@"bookmark"] autorelease]];
+    self.table.dataSource = self;
+    self.table.delegate = self;
+    self.list.documentView = self.table;
     [self addSubview:self.list];
     self.status = label(@"", [NSFont systemFontOfSize:13], NSColor.secondaryLabelColor);
     [self addSubview:self.status];
@@ -337,26 +349,33 @@ static const CGFloat bookmarkListTop = 42;
         NSString *contextLabel = [[row[@"label"] componentsSeparatedByString:@"."] lastObject];
         return [contextLabel localizedCaseInsensitiveContainsString:query];
     }]];
-    for (KuriPopoverButton *button in self.buttons) [button removeFromSuperview];
     self.focus = -1;
-    NSMutableArray *buttons = [NSMutableArray array];
-    for (NSDictionary *row in self.visibleRows) {
-        KuriPopoverButton *button = rowButton(@"", self, @selector(copyBookmark:), KuriPopoverButton.class);
-        button.identifier = row[@"id"];
-        button.secondaryTitle = [NSString stringWithFormat:@"(%@)", row[@"label"]];
-        button.enabled = [row[@"url"] length] > 0;
-        button.toolTip = row[@"url"] ?: row[@"unavailable"];
-        [self renderRow:row button:button];
-        [self.list.documentView addSubview:button];
-        [buttons addObject:button];
-    }
-    self.buttons = buttons;
+    [self.table reloadData];
     self.status.hidden = self.visibleRows.count != 0;
     self.status.stringValue = self.message ?: (self.rows.count ? @"No matching bookmarks" : @"No bookmarked services");
     self.status.toolTip = self.status.stringValue;
-    [self.list.contentView scrollToPoint:NSZeroPoint];
+    if (self.visibleRows.count) [self.table scrollRowToVisible:0];
     [self setNeedsLayout:YES];
     [self.owner layoutBookmarks];
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)table { return self.visibleRows.count; }
+- (BOOL)tableView:(NSTableView *)table shouldSelectRow:(NSInteger)row { return NO; }
+
+- (NSView *)tableView:(NSTableView *)table viewForTableColumn:(NSTableColumn *)column row:(NSInteger)position {
+    KuriPopoverButton *button = [table makeViewWithIdentifier:column.identifier owner:self];
+    if (!button) {
+        button = rowButton(@"", self, @selector(copyBookmark:), KuriPopoverButton.class);
+        button.identifier = column.identifier;
+    }
+    NSDictionary *row = self.visibleRows[position];
+    button.hovered = NO;
+    button.submenuOpen = position == self.focus;
+    button.secondaryTitle = [NSString stringWithFormat:@"(%@)", row[@"label"]];
+    button.enabled = [row[@"url"] length] > 0;
+    button.toolTip = row[@"url"] ?: row[@"unavailable"];
+    [self renderRow:row button:button];
+    return button;
 }
 
 - (void)renderRow:(NSDictionary *)row button:(KuriPopoverButton *)button {
@@ -364,6 +383,14 @@ static const CGFloat bookmarkListTop = 42;
     NSString *title = name.length ? [NSString stringWithFormat:@"%@ %@", name, secondary] : secondary;
     [button setAccessibilityLabel:title];
     [button setRowTitle:self.feedback[row[@"id"]] ? @"Copied" : title];
+}
+
+- (void)refreshVisibleRow:(NSInteger)position {
+    if (position < 0 || position >= (NSInteger)self.visibleRows.count) return;
+    KuriPopoverButton *button = [self.table viewAtColumn:0 row:position makeIfNecessary:NO];
+    if (!button) return;
+    button.submenuOpen = position == self.focus;
+    [self renderRow:self.visibleRows[position] button:button];
 }
 
 - (CGFloat)desiredHeight {
@@ -378,29 +405,20 @@ static const CGFloat bookmarkListTop = 42;
     self.list.frame = NSMakeRect(recentInset, bookmarkListTop, w, MAX(0, NSHeight(self.bounds) - bookmarkListTop - recentInset));
     self.status.frame = NSMakeRect(recentInset + 6, bookmarkListTop, MAX(0, w - 12), menuRowHeight);
     self.list.hidden = self.status.hidden == NO;
-    self.list.documentView.frame = NSMakeRect(0, 0, self.list.contentSize.width, menuRowHeight * self.buttons.count);
-    [self.buttons enumerateObjectsUsingBlock:^(KuriPopoverButton *button, NSUInteger index, BOOL *stop) {
-        button.frame = NSMakeRect(0, menuRowHeight * index, NSWidth(self.list.documentView.bounds), menuRowHeight);
-    }];
 }
 
 - (void)controlTextDidChange:(NSNotification *)note { [self filter]; }
 
 - (void)moveFocus:(NSInteger)step {
     NSInteger index = self.focus;
-    if (index < 0 && step < 0) index = self.buttons.count;
-    for (NSInteger next = index + step; next >= 0 && next < (NSInteger)self.buttons.count; next += step) {
-        KuriPopoverButton *button = self.buttons[next];
-        if (!button.enabled) continue;
-        if (self.focus >= 0) {
-            KuriPopoverButton *previous = self.buttons[self.focus];
-            previous.submenuOpen = NO;
-            [self renderRow:self.visibleRows[self.focus] button:previous];
-        }
+    if (index < 0 && step < 0) index = self.visibleRows.count;
+    for (NSInteger next = index + step; next >= 0 && next < (NSInteger)self.visibleRows.count; next += step) {
+        if (![self.visibleRows[next][@"url"] length]) continue;
+        NSInteger previous = self.focus;
         self.focus = next;
-        button.submenuOpen = YES;
-        [self renderRow:self.visibleRows[next] button:button];
-        [self.list.documentView scrollRectToVisible:button.frame];
+        [self.table scrollRowToVisible:next];
+        [self refreshVisibleRow:previous];
+        [self refreshVisibleRow:next];
         return;
     }
 }
@@ -413,31 +431,30 @@ static const CGFloat bookmarkListTop = 42;
         return YES;
     }
     if ((event.keyCode == 36 || event.keyCode == 76) && self.focus >= 0) {
-        [self copyBookmark:self.buttons[self.focus]];
+        [self copyRow:self.focus pasteboard:NSPasteboard.generalPasteboard];
         return YES;
     }
     return NO;
 }
 
 - (void)copyBookmark:(KuriPopoverButton *)button {
-    [self copyBookmark:button pasteboard:NSPasteboard.generalPasteboard];
+    [self copyRow:[self.table rowForView:button] pasteboard:NSPasteboard.generalPasteboard];
 }
 
-- (void)copyBookmark:(KuriPopoverButton *)button pasteboard:(NSPasteboard *)pasteboard {
-    NSUInteger position = [self.buttons indexOfObjectIdenticalTo:button];
-    if (position == NSNotFound) return;
+- (void)copyRow:(NSInteger)position pasteboard:(NSPasteboard *)pasteboard {
+    if (position < 0 || position >= (NSInteger)self.visibleRows.count) return;
     NSDictionary *row = self.visibleRows[position];
     if (!copyServiceURL(row[@"url"], pasteboard)) return;
     NSString *key = row[@"id"];
     NSUUID *token = NSUUID.UUID;
     self.feedback[key] = token;
-    [self renderRow:row button:button];
+    [self refreshVisibleRow:position];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         if (self.feedback[key] != token) return;
         [self.feedback removeObjectForKey:key];
         [self.visibleRows enumerateObjectsUsingBlock:^(NSDictionary *item, NSUInteger index, BOOL *stop) {
             if ([item[@"id"] isEqualToString:key]) {
-                [self renderRow:item button:self.buttons[index]];
+                [self refreshVisibleRow:index];
                 *stop = YES;
             }
         }];
@@ -446,13 +463,15 @@ static const CGFloat bookmarkListTop = 42;
 
 - (void)dealloc {
     self.search.delegate = nil;
+    self.table.dataSource = nil;
+    self.table.delegate = nil;
     [_search release];
     [_separator release];
     [_list release];
+    [_table release];
     [_status release];
     [_rows release];
     [_visibleRows release];
-    [_buttons release];
     [_feedback release];
     [_message release];
     [super dealloc];

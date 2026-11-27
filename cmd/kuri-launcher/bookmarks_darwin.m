@@ -4,23 +4,31 @@
 #import "settings_darwin.h"
 
 extern void kuriGoBookmarkRequest(char *request, uint64_t sequence);
+extern void kuriGoCancelBookmarkRequest(uint64_t sequence);
 NSNotificationName const KuriBookmarksDidChange = @"KuriBookmarksDidChange";
 
 // Both callers enqueue on the AppKit thread. Only the CLI runs in the background.
 static NSMutableDictionary *bookmarkReplies;
 static uint64_t bookmarkSequence;
 
-void kuriRequestBookmarks(NSDictionary *request, void (^reply)(NSDictionary *response)) {
+uint64_t kuriRequestBookmarks(NSDictionary *request, void (^reply)(NSDictionary *response)) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:request options:0 error:NULL];
     if (!data) {
         reply(@{@"error": @"Could not prepare the bookmark request."});
-        return;
+        return 0;
     }
     NSString *json = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
     if (!bookmarkReplies) bookmarkReplies = [[NSMutableDictionary alloc] init];
     uint64_t sequence = ++bookmarkSequence;
     bookmarkReplies[@(sequence)] = [[reply copy] autorelease];
     kuriGoBookmarkRequest((char *)json.UTF8String, sequence);
+    return sequence;
+}
+
+static void cancelBookmarkRequest(uint64_t sequence) {
+    if (!sequence) return;
+    [bookmarkReplies removeObjectForKey:@(sequence)];
+    kuriGoCancelBookmarkRequest(sequence);
 }
 
 void kuriRenderBookmarks(const char *json, uint64_t sequence) {
@@ -257,6 +265,7 @@ static NSScrollView *bookmarkTableScroll(NSTableView *table) {
 @property(nonatomic, retain) NSMutableDictionary<NSString *, NSArray *> *options;
 @property(nonatomic, copy) NSDictionary *kubeconfig;
 @property(nonatomic) NSUInteger editorRequest;
+@property(nonatomic) uint64_t optionRequest;
 @property(nonatomic) BOOL loadingOptions;
 @property(nonatomic) BOOL saving;
 @end
@@ -520,11 +529,13 @@ static NSScrollView *bookmarkTableScroll(NSTableView *table) {
     [request addEntriesFromDictionary:self.selection];
     request[@"operation"] = operations[field];
     NSUInteger generation = ++self.editorRequest;
+    cancelBookmarkRequest(self.optionRequest);
     self.loadingOptions = YES;
     if (!self.editorStatus.stringValue.length) [self showEditorStatus:@"Loading options..." error:NO];
     [self refreshEditor];
-    kuriRequestBookmarks(request, ^(NSDictionary *response) {
+    self.optionRequest = kuriRequestBookmarks(request, ^(NSDictionary *response) {
         if (generation != self.editorRequest || !self.selects) return;
+        self.optionRequest = 0;
         self.loadingOptions = NO;
         if ([response[@"refresh"] boolValue]) {
             [self reloadEditor:response[@"error"]];
@@ -609,6 +620,8 @@ static NSScrollView *bookmarkTableScroll(NSTableView *table) {
 
 - (void)endEditing {
     ++self.editorRequest;
+    cancelBookmarkRequest(self.optionRequest);
+    self.optionRequest = 0;
     self.loadingOptions = NO;
     [self.choices close];
     self.choices = nil;

@@ -183,6 +183,12 @@ func TestBookmarkAddress(t *testing.T) {
 	if _, got := ctx.BookmarkAddress(target, "http"); got != "http.api.default.live.test.localhost:8080" {
 		t.Fatal(got)
 	}
+	colliding := NewContextRoutes("dev", []string{"dev", target.Context, Alias(target.Context)}, server, nil, nil)
+	for _, portName := range []string{"", "http"} {
+		if _, got := colliding.BookmarkAddress(target, portName); got != "" {
+			t.Errorf("used the ambiguous alias for port %q: %s", portName, got)
+		}
+	}
 	server.Styles.ExplicitContext = false
 	ctx = NewContextRoutes(target.Context, []string{target.Context}, server, nil, aliases)
 	if _, got := ctx.BookmarkAddress(target, ""); got != "" {

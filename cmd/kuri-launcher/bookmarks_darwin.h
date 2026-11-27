@@ -10,7 +10,7 @@ void kuriRenderBookmarks(const char *json, uint64_t sequence);
 @class KuriSettings;
 
 extern NSNotificationName const KuriBookmarksDidChange;
-void kuriRequestBookmarks(NSDictionary *request, void (^reply)(NSDictionary *response));
+uint64_t kuriRequestBookmarks(NSDictionary *request, void (^reply)(NSDictionary *response));
 
 @interface KuriBookmarkSettings : NSObject
 @property(nonatomic, readonly) NSView *view;

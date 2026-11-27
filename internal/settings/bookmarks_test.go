@@ -68,6 +68,19 @@ func TestBookmarkStoreOrderAndConflicts(t *testing.T) {
 func TestExportRefusesBookmarksPath(t *testing.T) {
 	home := t.TempDir()
 	store := NewStore(home)
+	if err := os.Mkdir(store.Directory(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	linkedDir := filepath.Join(home, "linked-dir")
+	if err := os.Symlink(store.Directory(), linkedDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(store.Directory(), "Bookmarks.yaml"),
+		filepath.Join(linkedDir, "BOOKMARKS.YAML")} {
+		if err := store.ExportTransfer(path, []TransferField{TransferDomain}); err == nil {
+			t.Errorf("export accepted reserved path before first save: %s", path)
+		}
+	}
 	item := Bookmark{KubeconfigPath: filepath.Join(home, "config"),
 		BookmarkTarget: BookmarkTarget{Context: "prod", Namespace: "default", Service: "api"}}
 	if _, _, err := store.AddBookmark(t.Context(), item, nil); err != nil {

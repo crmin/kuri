@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/crmin/kuri/internal/settings"
 	corev1 "k8s.io/api/core/v1"
@@ -177,6 +183,113 @@ func TestBookmarkCatalogQueries(t *testing.T) {
 	reply := handleBookmarks(t.Context(), store, req)
 	if reply.Error != "list services: Forbidden" {
 		t.Fatalf("forbidden: %+v", reply)
+	}
+}
+
+func TestBookmarkCatalogDeadline(t *testing.T) {
+	serverCanceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		close(serverCanceled)
+	}))
+	defer server.Close()
+	home := t.TempDir()
+	path := bookmarkTestConfig(t, home, server.URL)
+	store := settings.NewStore(home)
+	contexts := handleBookmarks(t.Context(), store, bookmarkRequest{Operation: "contexts"})
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	reply := handleBookmarks(ctx, store, bookmarkRequest{
+		Operation: "namespaces", BookmarkTarget: settings.BookmarkTarget{Context: "prod"},
+		KubeconfigPath: path, KubeconfigFingerprint: contexts.KubeconfigFingerprint,
+	})
+	if reply.Error != context.DeadlineExceeded.Error() || len(reply.Options) != 0 {
+		t.Fatalf("lookup did not return a deadline error: %+v", reply)
+	}
+	select {
+	case <-serverCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe the canceled lookup")
+	}
+}
+
+func TestBookmarkDeadlineStopsCredentialGroup(t *testing.T) {
+	home := t.TempDir()
+	binary := filepath.Join(home, "kuri")
+	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build kuri: %v\n%s", err, out)
+	}
+	path := bookmarkTestConfig(t, home, "https://127.0.0.1:1")
+	pidsPath := filepath.Join(home, "credential.pids")
+	config, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kubeconfig := strings.ReplaceAll(string(config), "context: {cluster: test}", "context: {cluster: test, user: slow}")
+	kubeconfig += fmt.Sprintf(`users:
+- name: slow
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      interactiveMode: Never
+      command: /bin/sh
+      args:
+      - -c
+      - 'sleep 30 & printf "%%s %%s\n" "$$" "$!" > "$1"; wait'
+      - plugin
+      - %q
+`, pidsPath)
+	if err := os.WriteFile(path, []byte(kubeconfig), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := settings.NewStore(home)
+	contexts := handleBookmarks(t.Context(), store, bookmarkRequest{Operation: "contexts"})
+	if contexts.Error != "" {
+		t.Fatal(contexts.Error)
+	}
+	payload, err := json.Marshal(bookmarkRequest{
+		Operation: "namespaces", BookmarkTarget: settings.BookmarkTarget{Context: "prod"},
+		KubeconfigPath: path, KubeconfigFingerprint: contexts.KubeconfigFingerprint,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "__bookmarks")
+	cmd.WaitDelay = time.Second
+	cmd.Env = append(os.Environ(), "HOME="+home, "TMPDIR="+home)
+	cmd.Stdin = bytes.NewReader(payload)
+	out, runErr := cmd.Output()
+
+	ids, err := os.ReadFile(pidsPath)
+	if err != nil {
+		t.Fatalf("credential plugin did not start: %v (CLI: %v, %s)", err, runErr, out)
+	}
+	pids := strings.Fields(string(ids))
+	if len(pids) != 2 {
+		t.Fatalf("expected the plugin and its child: %q", ids)
+	}
+	for _, id := range pids {
+		pid, err := strconv.Atoi(id)
+		if err != nil || pid <= 1 {
+			t.Fatalf("invalid fixture PID %q", id)
+		}
+		status, _ := exec.Command("/bin/ps", "-p", id, "-o", "stat=").Output()
+		if state := strings.TrimSpace(string(status)); state != "" && !strings.HasPrefix(state, "Z") {
+			if proc, err := os.FindProcess(pid); err == nil {
+				_ = proc.Kill()
+			}
+			t.Errorf("credential process %d survived: %s", pid, state)
+		}
+	}
+	var reply bookmarkReply
+	if runErr != nil || json.Unmarshal(out, &reply) != nil || reply.Error != context.DeadlineExceeded.Error() {
+		t.Fatalf("expected a bounded CLI deadline reply: %v, %s", runErr, out)
+	}
+	matches, err := filepath.Glob(filepath.Join(home, ".credential-*"))
+	if err != nil || len(matches) > 0 {
+		t.Fatalf("credential session was not removed: %v %v", matches, err)
 	}
 }
 

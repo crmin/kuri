@@ -68,6 +68,8 @@ static NSString *caseName;
 static BOOL openedLoginItems;
 static NSDictionary *bookmarkRequest;
 static uint64_t bookmarkSequence;
+static uint64_t canceledBookmarkSequence;
+static NSUInteger canceledBookmarkRequests;
 
 static NSEvent *keyEvent(NSString *characters, unsigned short key, NSEventModifierFlags modifiers) {
     return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:modifiers
@@ -89,6 +91,11 @@ void kuriGoBookmarkRequest(char *request, uint64_t sequence) {
     NSData *data = [NSData dataWithBytes:request length:strlen(request)];
     bookmarkRequest = [[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] retain];
     bookmarkSequence = sequence;
+}
+
+void kuriGoCancelBookmarkRequest(uint64_t sequence) {
+    canceledBookmarkSequence = sequence;
+    ++canceledBookmarkRequests;
 }
 
 static void replyToBookmarkRequest(uint64_t sequence, NSString *operation, NSDictionary *reply) {
@@ -136,7 +143,7 @@ static void replyToBookmarkRequest(uint64_t sequence, NSString *operation, NSDic
 
 @interface KuriBookmarkMenuView : NSView
 - (void)filter;
-- (void)copyBookmark:(NSButton *)button pasteboard:(NSPasteboard *)pasteboard;
+- (void)copyRow:(NSInteger)position pasteboard:(NSPasteboard *)pasteboard;
 @end
 
 void kuriGoAction(int action) { abort(); }
@@ -213,17 +220,47 @@ int main(int argc, char **argv) {
             }
             search.stringValue = @"";
             [menu filter];
-            NSArray<NSButton *> *buttons = [menu valueForKey:@"buttons"];
-            if (![buttons[0].title isEqual:@"Alpha Shared (web.api.namespace.live)"] ||
-                buttons[1].enabled || ![buttons[2].title isEqual:@"(index.default.other)"]) abort();
-            NSColor *secondary = [buttons[0].attributedTitle attribute:NSForegroundColorAttributeName
-                atIndex:buttons[0].title.length - 1 effectiveRange:NULL];
+            [menu layoutSubtreeIfNeeded];
+            NSTableView *table = [menu valueForKey:@"table"];
+            NSButton *first = [table viewAtColumn:0 row:0 makeIfNecessary:YES];
+            NSButton *second = [table viewAtColumn:0 row:1 makeIfNecessary:YES];
+            NSButton *third = [table viewAtColumn:0 row:2 makeIfNecessary:YES];
+            if (![first.title isEqual:@"Alpha Shared (web.api.namespace.live)"] ||
+                second.enabled || ![third.title isEqual:@"(index.default.other)"]) abort();
+            NSColor *secondary = [first.attributedTitle attribute:NSForegroundColorAttributeName
+                atIndex:first.title.length - 1 effectiveRange:NULL];
             if (![secondary isEqual:NSColor.secondaryLabelColor]) abort();
             NSPasteboard *clipboard = [NSPasteboard pasteboardWithUniqueName];
-            [menu copyBookmark:buttons[0] pasteboard:clipboard];
-            if (![buttons[0].title isEqual:@"Copied"] || ![[clipboard stringForType:NSPasteboardTypeString] isEqual:url]) abort();
+            [menu copyRow:0 pasteboard:clipboard];
+            if (![first.title isEqual:@"Copied"] || ![[clipboard stringForType:NSPasteboardTypeString] isEqual:url]) abort();
+            search.stringValue = @"invoices";
+            [menu filter];
+            [menu layoutSubtreeIfNeeded];
+            NSButton *filtered = [table viewAtColumn:0 row:0 makeIfNecessary:YES];
+            if ([filtered.title isEqual:@"Copied"] || filtered.enabled) abort();
+            search.stringValue = @"";
+            [menu filter];
+            [menu layoutSubtreeIfNeeded];
+            first = [table viewAtColumn:0 row:0 makeIfNecessary:YES];
+            if (![first.title isEqual:@"Copied"]) abort();
             [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1.1]];
-            if (![buttons[0].title isEqual:@"Alpha Shared (web.api.namespace.live)"]) abort();
+            if (![first.title isEqual:@"Alpha Shared (web.api.namespace.live)"]) abort();
+            if ([table rowForView:first] != 0) abort();
+            NSMutableArray *many = [NSMutableArray arrayWithArray:services];
+            for (NSUInteger i = 3; i < 1000; ++i) {
+                NSString *name = [NSString stringWithFormat:@"Item %lu", (unsigned long)i];
+                [many addObject:@{@"id": name, @"name": name, @"label": @"api.default.live", @"url": url}];
+            }
+            [[NSNotificationCenter defaultCenter] postNotificationName:KuriBookmarksDidChange object:nil];
+            replyToBookmarkRequest(bookmarkSequence, @"menu", @{@"rows": many});
+            search.stringValue = @"Item";
+            [menu filter];
+            [menu layoutSubtreeIfNeeded];
+            if (table.numberOfRows != 997 || [table viewAtColumn:0 row:900 makeIfNecessary:NO]) abort();
+            [table scrollRowToVisible:996];
+            [table layoutSubtreeIfNeeded];
+            NSButton *last = [table viewAtColumn:0 row:996 makeIfNecessary:YES];
+            if (![last.title isEqual:@"Item 999 (api.default.live)"]) abort();
             [clipboard releaseGlobally];
 
             NSRect usable = NSMakeRect(0, 0, 1200, 800);
@@ -317,6 +354,7 @@ int main(int argc, char **argv) {
                 [bookmarks openEditor:nil];
                 uint64_t canceled = bookmarkSequence;
                 [settings closeDialog:nil];
+                if (canceledBookmarkSequence != canceled || canceledBookmarkRequests != 1) abort();
                 [bookmarks openEditor:nil];
                 uint64_t current = bookmarkSequence;
                 replyToBookmarkRequest(canceled, nil, @{@"options": @[@"stale"]});
@@ -333,6 +371,7 @@ int main(int argc, char **argv) {
                 [bookmarks choose:@"prod" forField:0];
                 uint64_t staleNamespace = bookmarkSequence;
                 [bookmarks choose:@"preview" forField:0];
+                if (canceledBookmarkSequence != staleNamespace || canceledBookmarkRequests != 2) abort();
                 replyToBookmarkRequest(staleNamespace, nil, @{@"options": @[@"stale"]});
                 if (selects[1].enabled) abort();
                 replyToBookmarkRequest(bookmarkSequence, @"namespaces", @{@"options": @[@"default"]});
@@ -351,7 +390,7 @@ int main(int argc, char **argv) {
                 [bookmarks addItem];
                 if (![bookmarkRequest[@"name"] isEqual:name.stringValue] || ![bookmarkRequest[@"context"] isEqual:@"preview"]) abort();
                 [settings closeDialog:nil];
-                if (![settings valueForKey:@"dialog"]) abort();
+                if (![settings valueForKey:@"dialog"] || canceledBookmarkRequests != 2) abort();
                 replyToBookmarkRequest(bookmarkSequence, @"add", @{@"error": @"Choose a Port Name."});
                 NSTextField *status = [bookmarks valueForKey:@"editorStatus"];
                 if (![settings valueForKey:@"dialog"] || ![status.stringValue isEqual:@"Choose a Port Name."]) abort();
